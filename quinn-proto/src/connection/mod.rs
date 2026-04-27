@@ -235,11 +235,22 @@ pub struct Connection {
     local_cid_state: CidState,
     /// State of the unreliable datagram extension
     datagrams: DatagramState,
+    /// 1-RTT packets that arrived before the TLS handshake reached `Established`.
+    buffered_handshake_1rtt: VecDeque<BufferedHandshakePacket>,
     /// Connection level statistics
     stats: ConnectionStats,
     /// QUIC version used for the connection.
     version: u32,
 }
+
+struct BufferedHandshakePacket {
+    received_at: Instant,
+    remote: SocketAddr,
+    number: u64,
+    packet: Packet,
+}
+
+const MAX_BUFFERED_HANDSHAKE_1RTT_PACKETS: usize = 64;
 
 impl Connection {
     pub(crate) fn new(
@@ -351,6 +362,7 @@ impl Connection {
                 config.stream_receive_window,
             ),
             datagrams: DatagramState::default(),
+            buffered_handshake_1rtt: VecDeque::new(),
             config,
             rem_cids: CidQueue::new(rem_cid),
             rng,
@@ -2361,8 +2373,19 @@ impl Connection {
                     debug!("discarding possible duplicate packet");
                     return;
                 } else if self.state.is_handshake() && packet.header.is_short() {
-                    // TODO: SHOULD buffer these to improve reordering tolerance.
-                    trace!("dropping short packet during handshake");
+                    let spin = match packet.header {
+                        Header::Short { spin, .. } => spin,
+                        _ => unreachable!("checked is_short above"),
+                    };
+                    self.on_packet_authenticated(
+                        now,
+                        packet.header.space(),
+                        ecn,
+                        number,
+                        spin,
+                        true,
+                    );
+                    self.buffer_handshake_1rtt_packet(now, remote, number.unwrap(), packet);
                     return;
                 } else {
                     if let Header::Initial(InitialHeader { ref token, .. }) = packet.header {
@@ -2442,6 +2465,43 @@ impl Connection {
         if let State::Closed(_) = self.state {
             self.close = remote == self.path.remote;
         }
+    }
+
+    fn buffer_handshake_1rtt_packet(
+        &mut self,
+        received_at: Instant,
+        remote: SocketAddr,
+        number: u64,
+        packet: Packet,
+    ) {
+        if self.buffered_handshake_1rtt.len() >= MAX_BUFFERED_HANDSHAKE_1RTT_PACKETS {
+            trace!("dropping short packet during handshake; buffer full");
+            return;
+        }
+
+        trace!("buffering short packet during handshake");
+        self.buffered_handshake_1rtt
+            .push_back(BufferedHandshakePacket {
+                received_at,
+                remote,
+                number,
+                packet,
+            });
+    }
+
+    fn process_buffered_handshake_1rtt(&mut self, now: Instant) -> Result<(), TransportError> {
+        while let Some(buffered) = self.buffered_handshake_1rtt.pop_front() {
+            if self.state.is_closed() {
+                break;
+            }
+            self.process_payload(
+                cmp::max(buffered.received_at, now),
+                buffered.remote,
+                buffered.number,
+                buffered.packet,
+            )?;
+        }
+        Ok(())
     }
 
     fn process_decrypted_packet(
@@ -2633,6 +2693,7 @@ impl Connection {
 
                 self.events.push_back(Event::Connected);
                 self.state = State::Established;
+                self.process_buffered_handshake_1rtt(now)?;
                 trace!("established");
                 Ok(())
             }

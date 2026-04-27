@@ -15,6 +15,8 @@ use crate::{
     crypto::Keys, frame, packet::SpaceId, range_set::ArrayRangeSet, shared::IssuedCid,
 };
 
+const PACKET_NUMBER_LIMIT: u64 = 1 << 62;
+
 pub(super) struct PacketSpace {
     pub(super) crypto: Option<Keys>,
     pub(super) dedup: Dedup,
@@ -157,13 +159,14 @@ impl PacketSpace {
     ///
     /// In the Data space, the connection's [`PacketNumberFilter`] must be used rather than calling
     /// this directly.
-    pub(super) fn get_tx_number(&mut self) -> u64 {
-        // TODO: Handle packet number overflow gracefully
-        assert!(self.next_packet_number < 2u64.pow(62));
+    pub(super) fn get_tx_number(&mut self) -> Option<u64> {
+        if self.next_packet_number >= PACKET_NUMBER_LIMIT {
+            return None;
+        }
         let x = self.next_packet_number;
         self.next_packet_number += 1;
         self.sent_with_keys += 1;
-        x
+        Some(x)
     }
 
     pub(super) fn can_send(&self, streams: &StreamsState) -> SendableFrames {
@@ -861,17 +864,17 @@ impl PacketNumberFilter {
         if n != self.next_skipped_packet_number {
             return n;
         }
-        n + 1
+        n.saturating_add(1).min(PACKET_NUMBER_LIMIT - 1)
     }
 
     pub(super) fn allocate(
         &mut self,
         rng: &mut (impl Rng + ?Sized),
         space: &mut PacketSpace,
-    ) -> u64 {
-        let n = space.get_tx_number();
-        if n != self.next_skipped_packet_number {
-            return n;
+    ) -> Option<u64> {
+        let n = space.get_tx_number()?;
+        if n != self.next_skipped_packet_number || space.next_packet_number >= PACKET_NUMBER_LIMIT {
+            return Some(n);
         }
 
         trace!("skipping pn {n}");
@@ -939,6 +942,34 @@ mod test {
         assert!(!dedup.insert(5));
         assert_eq!(dedup.next, 8);
         assert_eq!(dedup.window, 0b1111_1111);
+    }
+
+    #[test]
+    fn packet_number_limit_is_reported() {
+        let mut space = PacketSpace::new(Instant::now());
+        space.next_packet_number = PACKET_NUMBER_LIMIT - 1;
+
+        assert_eq!(space.get_tx_number(), Some(PACKET_NUMBER_LIMIT - 1));
+        assert_eq!(space.get_tx_number(), None);
+    }
+
+    #[test]
+    fn packet_number_filter_does_not_skip_past_limit() {
+        let mut rng = rand::rng();
+        let mut filter = PacketNumberFilter {
+            next_skipped_packet_number: PACKET_NUMBER_LIMIT - 1,
+            prev_skipped_packet_number: None,
+            exponent: 6,
+        };
+        let mut space = PacketSpace::new(Instant::now());
+        space.next_packet_number = PACKET_NUMBER_LIMIT - 1;
+
+        assert_eq!(filter.peek(&space), PACKET_NUMBER_LIMIT - 1);
+        assert_eq!(
+            filter.allocate(&mut rng, &mut space),
+            Some(PACKET_NUMBER_LIMIT - 1)
+        );
+        assert_eq!(filter.allocate(&mut rng, &mut space), None);
     }
 
     #[test]

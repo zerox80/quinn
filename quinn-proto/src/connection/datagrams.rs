@@ -36,9 +36,13 @@ impl Datagrams<'_> {
             return Err(SendDatagramError::TooLarge);
         }
         if drop {
-            self.conn
-                .datagrams
-                .drop_until_send_buffer_has_space(data.len(), self.conn.config.datagram_send_buffer_size);
+            if data.len() > self.conn.config.datagram_send_buffer_size {
+                return Err(SendDatagramError::TooLarge);
+            }
+            self.conn.datagrams.drop_until_send_buffer_has_space(
+                data.len(),
+                self.conn.config.datagram_send_buffer_size,
+            );
         } else if self.conn.datagrams.outgoing_total + data.len()
             > self.conn.config.datagram_send_buffer_size
         {

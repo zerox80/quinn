@@ -78,11 +78,18 @@ impl PacketBuilder {
             }
         }
 
-        let space = &mut conn.spaces[space_id];
-        let exact_number = match space_id {
-            SpaceId::Data => conn.packet_number_filter.allocate(&mut conn.rng, space),
-            _ => space.get_tx_number(),
+        let exact_number = {
+            let space = &mut conn.spaces[space_id];
+            match space_id {
+                SpaceId::Data => conn.packet_number_filter.allocate(&mut conn.rng, space),
+                _ => space.get_tx_number(),
+            }
         };
+        let Some(exact_number) = exact_number else {
+            conn.kill(TransportError::INTERNAL_ERROR("packet number limit reached").into());
+            return None;
+        };
+        let space = &mut conn.spaces[space_id];
 
         let span = trace_span!("send", space = ?space_id, pn = exact_number).entered();
 
