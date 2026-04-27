@@ -36,16 +36,9 @@ impl Datagrams<'_> {
             return Err(SendDatagramError::TooLarge);
         }
         if drop {
-            while self.conn.datagrams.outgoing_total > self.conn.config.datagram_send_buffer_size {
-                let prev = self
-                    .conn
-                    .datagrams
-                    .outgoing
-                    .pop_front()
-                    .expect("datagrams.outgoing_total desynchronized");
-                trace!(len = prev.data.len(), "dropping outgoing datagram");
-                self.conn.datagrams.outgoing_total -= prev.data.len();
-            }
+            self.conn
+                .datagrams
+                .drop_until_send_buffer_has_space(data.len(), self.conn.config.datagram_send_buffer_size);
         } else if self.conn.datagrams.outgoing_total + data.len()
             > self.conn.config.datagram_send_buffer_size
         {
@@ -67,6 +60,10 @@ impl Datagrams<'_> {
     ///
     /// Not necessarily the maximum size of received datagrams.
     pub fn max_size(&self) -> Option<usize> {
+        if self.conn.config.datagram_receive_buffer_size.is_none() {
+            return None;
+        }
+
         // We use the conservative overhead bound for any packet number, reducing the budget by at
         // most 3 bytes, so that PN size fluctuations don't cause users sending maximum-size
         // datagrams to suffer avoidable packet loss.
@@ -138,6 +135,16 @@ impl DatagramState {
         self.recv_buffered += datagram.data.len();
         self.incoming.push_back(datagram);
         Ok(was_empty)
+    }
+
+    fn drop_until_send_buffer_has_space(&mut self, incoming_len: usize, send_buffer_size: usize) {
+        while self.outgoing_total + incoming_len > send_buffer_size {
+            let Some(prev) = self.outgoing.pop_front() else {
+                break;
+            };
+            trace!(len = prev.data.len(), "dropping outgoing datagram");
+            self.outgoing_total -= prev.data.len();
+        }
     }
 
     /// Discard outgoing datagrams with a payload larger than `max_payload` bytes
@@ -214,6 +221,24 @@ mod tests {
         assert_eq!(state.outgoing.len(), 1);
         assert_eq!(state.outgoing[0].data.len(), 10);
         assert_eq!(state.outgoing_total, 10);
+    }
+
+    #[test]
+    fn drop_until_send_buffer_has_space_accounts_for_new_datagram() {
+        let mut state = DatagramState::default();
+        state.outgoing.push_back(Datagram {
+            data: Bytes::from_static(&[0; 7]),
+        });
+        state.outgoing.push_back(Datagram {
+            data: Bytes::from_static(&[0; 2]),
+        });
+        state.outgoing_total = 9;
+
+        state.drop_until_send_buffer_has_space(4, 10);
+
+        assert_eq!(state.outgoing.len(), 1);
+        assert_eq!(state.outgoing[0].data.len(), 2);
+        assert_eq!(state.outgoing_total, 2);
     }
 }
 
