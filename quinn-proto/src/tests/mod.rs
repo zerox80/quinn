@@ -1785,7 +1785,7 @@ fn handshake_1rtt_handling() {
 
     pair.drive();
 
-    assert!(pair.client_conn_mut(client_ch).stats().path.lost_packets != 0);
+    assert_eq!(pair.client_conn_mut(client_ch).stats().path.lost_packets, 0);
     let mut recv = pair.server_recv(server_ch, s);
     let mut chunks = recv.read(false).unwrap();
     assert_matches!(
@@ -2049,6 +2049,26 @@ fn datagram_unsupported() {
         Err(e) => panic!("unexpected error: {e}"),
         Ok(_) => panic!("unexpected success"),
     }
+}
+
+#[test]
+fn datagram_drop_send_respects_send_buffer_limit() {
+    let _guard = subscribe();
+    let mut client_config = client_config();
+    let mut transport_config = TransportConfig::default();
+    transport_config.datagram_send_buffer_size(8);
+    client_config.transport_config(Arc::new(transport_config));
+
+    let mut pair = Pair::default();
+    let (client_ch, _) = pair.connect_with(client_config);
+    assert!(pair.client_datagrams(client_ch).max_size().unwrap() > 8);
+
+    assert_matches!(
+        pair.client_datagrams(client_ch)
+            .send(vec![0; 9].into(), true),
+        Err(SendDatagramError::TooLarge)
+    );
+    assert_eq!(pair.client_datagrams(client_ch).send_buffer_space(), 8);
 }
 
 #[test]

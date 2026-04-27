@@ -1082,10 +1082,14 @@ impl State {
             }
 
             if transmits >= MAX_TRANSMIT_DATAGRAMS {
-                // TODO: What isn't ideal here yet is that if we don't poll all
-                // datagrams that could be sent we don't go into the `app_limited`
-                // state and CWND continues to grow until we get here the next time.
-                // See https://github.com/quinn-rs/quinn/issues/1126
+                // Do one extra proto poll without sending it. If there is no more data, proto can
+                // enter app-limited state immediately; otherwise the produced transmit is sent on
+                // the next driver poll.
+                self.send_buffer.clear();
+                self.send_buffer.reserve(self.inner.current_mtu() as usize);
+                self.buffered_transmit =
+                    self.inner
+                        .poll_transmit(now, max_datagrams, &mut self.send_buffer);
                 return Ok(true);
             }
         }

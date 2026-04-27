@@ -47,6 +47,8 @@ use crate::{
     connection::Connecting, incoming::Incoming, work_limiter::WorkLimiter,
 };
 
+const MAX_PREV_SOCKETS: usize = 4;
+
 /// A QUIC endpoint.
 ///
 /// An endpoint corresponds to a single UDP socket, may host many connections, and may act as both
@@ -279,7 +281,11 @@ impl Endpoint {
     pub fn rebind_abstract(&self, socket: Box<dyn AsyncUdpSocket>) -> io::Result<()> {
         let addr = socket.local_addr()?;
         let mut inner = self.inner.state.lock().unwrap();
-        inner.prev_socket = Some(mem::replace(&mut inner.socket, socket));
+        let old_socket = mem::replace(&mut inner.socket, socket);
+        inner.prev_sockets.push_back(old_socket);
+        while inner.prev_sockets.len() > MAX_PREV_SOCKETS {
+            inner.prev_sockets.pop_front();
+        }
         inner.ipv6 = addr.is_ipv6();
 
         // Update connection socket references
@@ -499,9 +505,9 @@ impl EndpointInner {
 pub(crate) struct State {
     socket: Box<dyn AsyncUdpSocket>,
     sender: Pin<Box<dyn UdpSender>>,
-    /// During an active migration, abandoned_socket receives traffic
-    /// until the first packet arrives on the new socket.
-    prev_socket: Option<Box<dyn AsyncUdpSocket>>,
+    /// During active migration, old sockets receive straggling traffic from paths that have not
+    /// completed migration yet.
+    prev_sockets: VecDeque<Box<dyn AsyncUdpSocket>>,
     inner: proto::Endpoint,
     recv_state: RecvState,
     driver: Option<Waker>,
@@ -525,20 +531,23 @@ impl State {
     fn drive_recv(&mut self, cx: &mut Context<'_>, now: Instant) -> Result<bool, io::Error> {
         let get_time = || self.runtime.now();
         self.recv_state.recv_limiter.start_cycle(get_time);
-        if let Some(socket) = &mut self.prev_socket {
+        let mut i = 0;
+        while i < self.prev_sockets.len() {
             // We don't care about the `PollProgress` from old sockets.
             let poll_res = self.recv_state.poll_socket(
                 cx,
                 &mut self.inner,
-                &mut **socket,
+                &mut **self.prev_sockets.get_mut(i).unwrap(),
                 &mut self.sender,
                 &*self.runtime,
                 now,
             );
             if poll_res.is_err() {
-                self.prev_socket = None;
+                self.prev_sockets.remove(i);
+            } else {
+                i += 1;
             }
-        };
+        }
         let poll_res = self.recv_state.poll_socket(
             cx,
             &mut self.inner,
@@ -549,11 +558,6 @@ impl State {
         );
         self.recv_state.recv_limiter.finish_cycle(get_time);
         let poll_res = poll_res?;
-        if poll_res.received_connection_packet {
-            // Traffic has arrived on self.socket, therefore there is no need for the abandoned
-            // one anymore. TODO: Account for multiple outgoing connections.
-            self.prev_socket = None;
-        }
         Ok(poll_res.keep_going)
     }
 
@@ -760,7 +764,7 @@ impl EndpointRef {
             state: Mutex::new(State {
                 socket,
                 sender,
-                prev_socket: None,
+                prev_sockets: VecDeque::new(),
                 inner,
                 ipv6,
                 events,
@@ -845,7 +849,6 @@ impl RecvState {
         runtime: &dyn Runtime,
         now: Instant,
     ) -> Result<PollProgress, io::Error> {
-        let mut received_connection_packet = false;
         let mut metas = [RecvMeta::default(); BATCH_SIZE];
         let mut iovs: [IoSliceMut<'_>; BATCH_SIZE] = {
             let mut bufs = self
@@ -886,7 +889,6 @@ impl RecvState {
                                 }
                                 Some(DatagramEvent::ConnectionEvent(handle, event)) => {
                                     // Ignoring errors from dropped connections that haven't yet been cleaned up
-                                    received_connection_packet = true;
                                     let _ = self
                                         .connections
                                         .senders
@@ -903,10 +905,7 @@ impl RecvState {
                     }
                 }
                 Poll::Pending => {
-                    return Ok(PollProgress {
-                        received_connection_packet,
-                        keep_going: false,
-                    });
+                    return Ok(PollProgress { keep_going: false });
                 }
                 // Ignore ECONNRESET as it's undefined in QUIC and may be injected by an
                 // attacker
@@ -918,10 +917,7 @@ impl RecvState {
                 }
             }
             if !self.recv_limiter.allow_work(|| runtime.now()) {
-                return Ok(PollProgress {
-                    received_connection_packet,
-                    keep_going: true,
-                });
+                return Ok(PollProgress { keep_going: true });
             }
         }
     }
@@ -940,8 +936,6 @@ impl fmt::Debug for RecvState {
 
 #[derive(Default)]
 struct PollProgress {
-    /// Whether a datagram was routed to an existing connection
-    received_connection_packet: bool,
     /// Whether datagram handling was interrupted early by the work limiter for fairness
     keep_going: bool,
 }
