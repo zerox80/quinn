@@ -2368,14 +2368,47 @@ impl Connection {
                 };
                 let _guard = span.enter();
 
+                if self.state.is_handshake() && packet.header.is_short() {
+                    if let Some(pn) = number {
+                        let spin = match packet.header {
+                            Header::Short { spin, .. } => spin,
+                            _ => unreachable!("checked is_short above"),
+                        };
+                        if self.buffer_handshake_1rtt_packet(now, remote, pn, packet) {
+                            self.on_packet_authenticated(
+                                now,
+                                SpaceId::Data,
+                                ecn,
+                                Some(pn),
+                                spin,
+                                true,
+                            );
+                        }
+                    }
+                    return;
+                }
+
                 let is_duplicate = |n| self.spaces[packet.header.space()].dedup.insert(n);
                 if number.is_some_and(is_duplicate) {
                     debug!("discarding possible duplicate packet");
                     return;
-                } else if self.state.is_handshake() && packet.header.is_short() {
+                }
+                if let Header::Initial(InitialHeader { ref token, .. }) = packet.header {
+                    if let State::Handshake(ref hs) = self.state {
+                        if self.side.is_server() && token != &hs.expected_token {
+                            // Clients must send the same retry token in every Initial. Initial
+                            // packets can be spoofed, so we discard rather than killing the
+                            // connection.
+                            warn!("discarding Initial with invalid retry token");
+                            return;
+                        }
+                    }
+                }
+
+                if !self.state.is_closed() {
                     let spin = match packet.header {
                         Header::Short { spin, .. } => spin,
-                        _ => unreachable!("checked is_short above"),
+                        _ => false,
                     };
                     self.on_packet_authenticated(
                         now,
@@ -2383,40 +2416,11 @@ impl Connection {
                         ecn,
                         number,
                         spin,
-                        true,
+                        packet.header.is_1rtt(),
                     );
-                    self.buffer_handshake_1rtt_packet(now, remote, number.unwrap(), packet);
-                    return;
-                } else {
-                    if let Header::Initial(InitialHeader { ref token, .. }) = packet.header {
-                        if let State::Handshake(ref hs) = self.state {
-                            if self.side.is_server() && token != &hs.expected_token {
-                                // Clients must send the same retry token in every Initial. Initial
-                                // packets can be spoofed, so we discard rather than killing the
-                                // connection.
-                                warn!("discarding Initial with invalid retry token");
-                                return;
-                            }
-                        }
-                    }
-
-                    if !self.state.is_closed() {
-                        let spin = match packet.header {
-                            Header::Short { spin, .. } => spin,
-                            _ => false,
-                        };
-                        self.on_packet_authenticated(
-                            now,
-                            packet.header.space(),
-                            ecn,
-                            number,
-                            spin,
-                            packet.header.is_1rtt(),
-                        );
-                    }
-
-                    self.process_decrypted_packet(now, remote, number, packet)
                 }
+
+                self.process_decrypted_packet(now, remote, number, packet)
             }
         };
 
@@ -2473,10 +2477,15 @@ impl Connection {
         remote: SocketAddr,
         number: u64,
         packet: Packet,
-    ) {
+    ) -> bool {
         if self.buffered_handshake_1rtt.len() >= MAX_BUFFERED_HANDSHAKE_1RTT_PACKETS {
             trace!("dropping short packet during handshake; buffer full");
-            return;
+            return false;
+        }
+
+        if !self.spaces[SpaceId::Data].dedup.insert(number) {
+            debug!("discarding possible duplicate packet");
+            return false;
         }
 
         trace!("buffering short packet during handshake");
@@ -2487,6 +2496,7 @@ impl Connection {
                 number,
                 packet,
             });
+        true
     }
 
     fn process_buffered_handshake_1rtt(&mut self, now: Instant) -> Result<(), TransportError> {
