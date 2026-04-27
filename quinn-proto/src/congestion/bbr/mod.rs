@@ -324,7 +324,7 @@ impl Bbr {
         // time.
         if self.is_at_full_bandwidth {
             self.cwnd = target_window.min(self.cwnd + bytes_acked);
-        } else if (self.cwnd_gain < target_window as f32) || (self.acked_bytes < self.init_cwnd) {
+        } else if (self.cwnd < target_window) || (self.acked_bytes < self.init_cwnd) {
             // If the connection is not yet out of startup phase, do not decrease
             // the window.
             self.cwnd += bytes_acked;
@@ -674,5 +674,38 @@ mod tests {
             .on_ack(start + interval * 3, start + interval, 1200, 0, false);
 
         assert_eq!(bbr.metrics().bandwidth_estimate, Some(960_000));
+    }
+
+    #[test]
+    fn startup_does_not_grow_cwnd_above_target_window() {
+        let now = Instant::now();
+        let mut bbr = Bbr::new(Arc::new(BbrConfig::default()), 1200);
+
+        bbr.min_rtt = Duration::from_millis(10);
+        bbr.max_bandwidth.on_sent(now, 100_000);
+        bbr.max_bandwidth
+            .on_sent(now + Duration::from_millis(1), 100_000);
+        bbr.max_bandwidth.on_ack(
+            now + Duration::from_millis(2),
+            now,
+            100_000,
+            bbr.round_count,
+            false,
+        );
+        bbr.max_bandwidth.on_ack(
+            now + Duration::from_millis(3),
+            now + Duration::from_millis(1),
+            100_000,
+            bbr.round_count,
+            false,
+        );
+
+        let target_window = bbr.get_target_cwnd(bbr.cwnd_gain);
+        bbr.cwnd = target_window + 1;
+        bbr.acked_bytes = bbr.init_cwnd;
+
+        bbr.calculate_cwnd(1200, 0);
+
+        assert_eq!(bbr.cwnd, target_window + 1);
     }
 }
