@@ -835,8 +835,8 @@ impl PendingAcks {
 pub(super) struct PacketNumberFilter {
     /// Next outgoing packet number to skip
     next_skipped_packet_number: u64,
-    /// Most recently skipped packet number
-    prev_skipped_packet_number: Option<u64>,
+    /// Skipped packet numbers which must not be acknowledged
+    skipped_packet_numbers: Vec<u64>,
     /// Next packet number to skip is randomly selected from 2^n..2^n+1
     exponent: u32,
 }
@@ -847,7 +847,7 @@ impl PacketNumberFilter {
         let exponent = 6;
         Self {
             next_skipped_packet_number: rng.random_range(0..2u64.saturating_pow(exponent)),
-            prev_skipped_packet_number: None,
+            skipped_packet_numbers: Vec::new(),
             exponent,
         }
     }
@@ -856,7 +856,7 @@ impl PacketNumberFilter {
     pub(super) fn disabled() -> Self {
         Self {
             next_skipped_packet_number: u64::MAX,
-            prev_skipped_packet_number: None,
+            skipped_packet_numbers: Vec::new(),
             exponent: u32::MAX,
         }
     }
@@ -881,7 +881,8 @@ impl PacketNumberFilter {
 
         trace!("skipping pn {n}");
         // Skip this packet number, and choose the next one to skip
-        self.prev_skipped_packet_number = Some(self.next_skipped_packet_number);
+        self.skipped_packet_numbers
+            .push(self.next_skipped_packet_number);
         let next_exponent = self.exponent.saturating_add(1);
         self.next_skipped_packet_number = rng
             .random_range(2u64.saturating_pow(self.exponent)..2u64.saturating_pow(next_exponent));
@@ -897,8 +898,9 @@ impl PacketNumberFilter {
     ) -> Result<(), TransportError> {
         if space_id == SpaceId::Data
             && self
-                .prev_skipped_packet_number
-                .is_some_and(|x| range.contains(&x))
+                .skipped_packet_numbers
+                .iter()
+                .any(|packet| range.contains(packet))
         {
             return Err(TransportError::PROTOCOL_VIOLATION("unsent packet acked"));
         }
@@ -960,7 +962,7 @@ mod test {
         let mut rng = rand::rng();
         let mut filter = PacketNumberFilter {
             next_skipped_packet_number: PACKET_NUMBER_LIMIT - 1,
-            prev_skipped_packet_number: None,
+            skipped_packet_numbers: Vec::new(),
             exponent: 6,
         };
         let mut space = PacketSpace::new(Instant::now());
@@ -972,6 +974,32 @@ mod test {
             Some(PACKET_NUMBER_LIMIT - 1)
         );
         assert_eq!(filter.allocate(&mut rng, &mut space), None);
+    }
+
+    #[test]
+    fn packet_number_filter_rejects_all_skipped_packet_numbers() {
+        let filter = PacketNumberFilter {
+            next_skipped_packet_number: 15,
+            skipped_packet_numbers: vec![3, 9],
+            exponent: 6,
+        };
+
+        assert!(matches!(
+            filter.check_ack(SpaceId::Data, 2..=4),
+            Err(TransportError {
+                code: crate::TransportErrorCode::PROTOCOL_VIOLATION,
+                ..
+            })
+        ));
+        assert!(matches!(
+            filter.check_ack(SpaceId::Data, 8..=10),
+            Err(TransportError {
+                code: crate::TransportErrorCode::PROTOCOL_VIOLATION,
+                ..
+            })
+        ));
+        assert!(filter.check_ack(SpaceId::Initial, 2..=4).is_ok());
+        assert!(filter.check_ack(SpaceId::Data, 4..=8).is_ok());
     }
 
     #[test]

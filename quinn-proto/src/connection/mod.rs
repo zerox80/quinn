@@ -1409,7 +1409,26 @@ impl Connection {
     /// faster or reduce loss to settle on optimal values by restarting from the initial
     /// configuration in the [`TransportConfig`].
     pub fn path_changed(&mut self, now: Instant) {
-        self.path.reset(now, &self.config);
+        self.path_counter = self.path_counter.wrapping_add(1);
+        let peer_max_udp_payload_size =
+            u16::try_from(self.peer_params.max_udp_payload_size.into_inner()).unwrap_or(u16::MAX);
+        let mut new_path = PathData::new(
+            self.path.remote,
+            self.allow_mtud,
+            Some(peer_max_udp_payload_size),
+            self.path_counter,
+            now,
+            &self.config,
+        );
+        new_path.validated = self.path.validated;
+        new_path.total_recvd = self.path.total_recvd;
+        new_path.total_sent = self.path.total_sent;
+
+        let mut prev = mem::replace(&mut self.path, new_path);
+        prev.challenge = None;
+        prev.challenge_pending = false;
+        self.prev_path = Some((self.rem_cids.active(), prev));
+        self.set_loss_detection_timer(now);
     }
 
     /// Modify the number of remotely initiated streams that may be concurrently open
@@ -1488,7 +1507,6 @@ impl Connection {
             return Ok(());
         }
 
-        let mut ack_eliciting_acked = false;
         let mut active_ack_eliciting_acked = false;
         let mut active_newly_acked = 0;
         let mut active_congestion_acked = false;
@@ -1503,7 +1521,6 @@ impl Connection {
                     // https://www.rfc-editor.org/rfc/rfc9000.html#name-limiting-ranges-by-tracking
                     self.spaces[space].pending_acks.subtract_below(acked);
                 }
-                ack_eliciting_acked |= info.ack_eliciting;
                 if active_path_packet {
                     active_ack_eliciting_acked |= info.ack_eliciting;
                     active_newly_acked += 1;
@@ -1553,7 +1570,7 @@ impl Connection {
         // Must be called before crypto/pto_count are clobbered
         self.detect_lost_packets(now, space, true);
 
-        if ack_eliciting_acked && self.peer_completed_address_validation() {
+        if active_ack_eliciting_acked && self.peer_completed_address_validation() {
             self.pto_count = 0;
         }
 
@@ -3784,6 +3801,29 @@ impl Connection {
     #[cfg(test)]
     pub(crate) fn bytes_in_flight(&self) -> u64 {
         self.path.in_flight.bytes
+    }
+
+    #[cfg(test)]
+    pub(crate) fn previous_path_bytes_in_flight(&self) -> Option<u64> {
+        self.prev_path
+            .as_ref()
+            .map(|(_, path)| path.in_flight.bytes)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn path_generation(&self) -> u64 {
+        self.path.generation()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pto_count(&self) -> u32 {
+        self.pto_count
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_pto_count_for_test(&mut self, pto_count: u32, now: Instant) {
+        self.pto_count = pto_count;
+        self.set_loss_detection_timer(now);
     }
 
     /// Number of bytes worth of non-ack-only packets that may be sent
