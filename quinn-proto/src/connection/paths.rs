@@ -1,4 +1,7 @@
-use std::{cmp, net::SocketAddr};
+use std::{
+    cmp,
+    net::{IpAddr, SocketAddr},
+};
 
 use tracing::trace;
 
@@ -332,6 +335,10 @@ impl RttEstimator {
         self.min
     }
 
+    pub(crate) fn latest(&self) -> Duration {
+        self.latest
+    }
+
     // PTO computed as described in RFC9002#6.2.1
     pub(crate) fn pto_base(&self) -> Duration {
         self.get() + cmp::max(4 * self.var, TIMER_GRANULARITY)
@@ -365,15 +372,25 @@ pub(crate) struct PathResponses {
 }
 
 impl PathResponses {
-    pub(crate) fn push(&mut self, packet: u64, token: u64, remote: SocketAddr) {
+    pub(crate) fn push(
+        &mut self,
+        packet: u64,
+        token: u64,
+        remote: SocketAddr,
+        local_ip: Option<IpAddr>,
+    ) {
         /// Arbitrary permissive limit to prevent abuse
         const MAX_PATH_RESPONSES: usize = 16;
         let response = PathResponse {
             packet,
             token,
             remote,
+            local_ip,
         };
-        let existing = self.pending.iter_mut().find(|x| x.remote == remote);
+        let existing = self
+            .pending
+            .iter_mut()
+            .find(|x| x.remote == remote && x.local_ip == local_ip);
         if let Some(existing) = existing {
             // Update a queued response
             if existing.packet <= packet {
@@ -390,20 +407,28 @@ impl PathResponses {
         }
     }
 
-    pub(crate) fn pop_off_path(&mut self, remote: SocketAddr) -> Option<(u64, SocketAddr)> {
+    pub(crate) fn pop_off_path(
+        &mut self,
+        remote: SocketAddr,
+        local_ip: Option<IpAddr>,
+    ) -> Option<(u64, SocketAddr, Option<IpAddr>)> {
         let response = *self.pending.last()?;
-        if response.remote == remote {
+        if response.remote == remote && response.local_ip == local_ip {
             // We don't bother searching further because we expect that the on-path response will
             // get drained in the immediate future by a call to `pop_on_path`
             return None;
         }
         self.pending.pop();
-        Some((response.token, response.remote))
+        Some((response.token, response.remote, response.local_ip))
     }
 
-    pub(crate) fn pop_on_path(&mut self, remote: SocketAddr) -> Option<u64> {
+    pub(crate) fn pop_on_path(
+        &mut self,
+        remote: SocketAddr,
+        local_ip: Option<IpAddr>,
+    ) -> Option<u64> {
         let response = *self.pending.last()?;
-        if response.remote != remote {
+        if response.remote != remote || response.local_ip != local_ip {
             // We don't bother searching further because we expect that the off-path response will
             // get drained in the immediate future by a call to `pop_off_path`
             return None;
@@ -424,6 +449,33 @@ struct PathResponse {
     token: u64,
     /// The address the corresponding PATH_CHALLENGE was received from
     remote: SocketAddr,
+    local_ip: Option<IpAddr>,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::{IpAddr, Ipv4Addr};
+
+    use super::*;
+
+    #[test]
+    fn path_responses_distinguish_local_ip() {
+        let remote = "203.0.113.1:4433".parse().unwrap();
+        let local_a = Some(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)));
+        let local_b = Some(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2)));
+
+        let mut responses = PathResponses::default();
+        responses.push(1, 0x11, remote, local_b);
+
+        assert_eq!(responses.pop_on_path(remote, local_a), None);
+        assert_eq!(
+            responses.pop_off_path(remote, local_a),
+            Some((0x11, remote, local_b))
+        );
+
+        responses.push(2, 0x22, remote, local_a);
+        assert_eq!(responses.pop_on_path(remote, local_a), Some(0x22));
+    }
 }
 
 /// Summary statistics of packets that have been sent on a particular path, but which have not yet

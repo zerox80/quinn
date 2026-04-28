@@ -152,6 +152,7 @@ impl Endpoint {
             Ok((first_decode, remaining)) => DatagramConnectionEvent {
                 now,
                 remote,
+                local_ip,
                 ecn,
                 first_decode,
                 remaining,
@@ -631,6 +632,7 @@ impl Endpoint {
         match conn.handle_first_packet(
             incoming.received_at,
             incoming.addresses.remote,
+            incoming.addresses.local_ip,
             incoming.ecn,
             packet_number,
             incoming.packet,
