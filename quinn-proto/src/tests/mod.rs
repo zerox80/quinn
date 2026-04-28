@@ -1408,14 +1408,65 @@ fn drain_client_ack_packets(pair: &mut Pair) -> Vec<(Transmit, Bytes)> {
     packets
 }
 
-fn deliver_to_server_from(pair: &mut Pair, remote: SocketAddr, packets: Vec<(Transmit, Bytes)>) {
+fn deliver_to_server_incoming_from(
+    pair: &mut Pair,
+    remote: SocketAddr,
+    packets: Vec<(Transmit, Bytes)>,
+) {
     for (packet, buffer) in packets {
         assert_eq!(packet.destination, pair.server.addr);
         pair.server
             .inbound
             .push_back((pair.time, packet.ecn, BytesMut::from(buffer.as_ref())));
     }
-    pair.server.drive(pair.time, remote);
+    pair.server.drive_incoming(pair.time, remote);
+    pair.server.drive_conn_events();
+}
+
+fn deliver_to_server_from(pair: &mut Pair, remote: SocketAddr, packets: Vec<(Transmit, Bytes)>) {
+    deliver_to_server_incoming_from(pair, remote, packets);
+    pair.server.drive_outgoing(pair.time);
+}
+
+#[test]
+fn path_changed_isolates_old_in_flight_packets() {
+    let _guard = subscribe();
+    let mut pair = Pair::default_with_deterministic_pns();
+    let (_client_ch, server_ch) = pair.connect_with(client_config_with_deterministic_pns());
+    pair.drive();
+
+    let old_client_addr = pair.client.addr;
+    let old_path_generation = pair.server_conn_mut(server_ch).path_generation();
+
+    pair.server_conn_mut(server_ch).ping();
+    pair.drive_server();
+    let old_path_bytes = pair.server_conn_mut(server_ch).bytes_in_flight();
+    assert_ne!(old_path_bytes, 0);
+    let old_path_acks = drain_client_ack_packets(&mut pair);
+
+    let now = pair.time;
+    pair.server_conn_mut(server_ch).path_changed(now);
+
+    let server = pair.server_conn_mut(server_ch);
+    assert_ne!(server.path_generation(), old_path_generation);
+    assert_eq!(server.bytes_in_flight(), 0);
+    assert_eq!(server.previous_path_bytes_in_flight(), Some(old_path_bytes));
+    let mtu_before = server.path_mtu();
+    let congestion_window_before = server.congestion_window();
+    let stats_before = server.stats();
+
+    deliver_to_server_incoming_from(&mut pair, old_client_addr, old_path_acks);
+
+    let server = pair.server_conn_mut(server_ch);
+    let stats_after = server.stats();
+    assert!(
+        stats_after.frame_rx.acks > stats_before.frame_rx.acks,
+        "old-path ACK was not processed"
+    );
+    assert_eq!(server.bytes_in_flight(), 0);
+    assert_eq!(server.previous_path_bytes_in_flight(), Some(0));
+    assert_eq!(server.path_mtu(), mtu_before);
+    assert_eq!(server.congestion_window(), congestion_window_before);
 }
 
 #[test]
@@ -1451,6 +1502,54 @@ fn old_path_ack_after_migration_does_not_update_active_path() {
         stats_after.path.congestion_events,
         stats_before.path.congestion_events
     );
+}
+
+#[test]
+fn old_path_ack_after_migration_does_not_reset_active_path_pto() {
+    let _guard = subscribe();
+    let mut pair = Pair::default_with_deterministic_pns();
+    let (client_ch, server_ch) = pair.connect_with(client_config_with_deterministic_pns());
+    pair.drive();
+
+    let old_client_addr = pair.client.addr;
+
+    pair.server_conn_mut(server_ch).ping();
+    pair.drive_server();
+    let old_path_acks = drain_client_ack_packets(&mut pair);
+
+    pair.client.addr = SocketAddr::new(
+        Ipv4Addr::new(127, 0, 0, 1).into(),
+        CLIENT_PORTS.lock().unwrap().next().unwrap(),
+    );
+    pair.client_conn_mut(client_ch).ping();
+    pair.drive_client();
+    pair.server.drive(pair.time, pair.client.addr);
+    pair.server.outbound.clear();
+
+    assert_eq!(
+        pair.server_conn_mut(server_ch).remote_address(),
+        pair.client.addr
+    );
+    assert_eq!(pair.server_conn_mut(server_ch).pto_count(), 0);
+
+    let now = pair.time;
+    pair.server_conn_mut(server_ch)
+        .set_pto_count_for_test(1, now);
+    let server = pair.server_conn_mut(server_ch);
+    assert_eq!(server.pto_count(), 1);
+    let timeout_before = server.poll_timeout();
+    let stats_before = server.stats();
+
+    deliver_to_server_incoming_from(&mut pair, old_client_addr, old_path_acks);
+
+    let server = pair.server_conn_mut(server_ch);
+    let stats_after = server.stats();
+    assert!(
+        stats_after.frame_rx.acks > stats_before.frame_rx.acks,
+        "old-path ACK was not processed"
+    );
+    assert_eq!(server.pto_count(), 1);
+    assert_eq!(server.poll_timeout(), timeout_before);
 }
 
 #[test]

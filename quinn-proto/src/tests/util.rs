@@ -406,6 +406,15 @@ impl TestEndpoint {
         }
     }
 
+    pub(super) fn drive_conn_events(&mut self) {
+        for (ch, mut events) in self.conn_events.drain() {
+            let conn = self.connections.get_mut(&ch).unwrap();
+            for event in events.drain(..) {
+                conn.handle_event(event);
+            }
+        }
+    }
+
     pub(super) fn drive_outgoing(&mut self, now: Instant) {
         let buffer_size = self.endpoint.config().get_max_udp_payload_size() as usize;
         let mut buf = Vec::with_capacity(buffer_size);

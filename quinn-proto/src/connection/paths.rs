@@ -149,6 +149,7 @@ impl PathData {
     /// Resets RTT, congestion control, pacing and MTU states.
     ///
     /// This is useful when it is known the underlying path has changed.
+    #[cfg(test)]
     pub(super) fn reset(&mut self, now: Instant, config: &TransportConfig) {
         self.rtt = RttEstimator::new(config.initial_rtt);
         self.congestion = config
@@ -459,6 +460,42 @@ struct PathResponse {
     local_ip: Option<IpAddr>,
 }
 
+/// Summary statistics of packets that have been sent on a particular path, but which have not yet
+/// been acked or deemed lost
+pub(super) struct InFlight {
+    /// Sum of the sizes of all sent packets considered "in flight" by congestion control
+    ///
+    /// The size does not include IP or UDP overhead. Packets only containing ACK frames do not
+    /// count towards this to ensure congestion control does not impede congestion feedback.
+    pub(super) bytes: u64,
+    /// Number of packets in flight containing frames other than ACK and PADDING
+    ///
+    /// This can be 0 even when bytes is not 0 because PADDING frames cause a packet to be
+    /// considered "in flight" by congestion control. However, if this is nonzero, bytes will always
+    /// also be nonzero.
+    pub(super) ack_eliciting: u64,
+}
+
+impl InFlight {
+    fn new() -> Self {
+        Self {
+            bytes: 0,
+            ack_eliciting: 0,
+        }
+    }
+
+    fn insert(&mut self, packet: &SentPacket) {
+        self.bytes += u64::from(packet.size);
+        self.ack_eliciting += u64::from(packet.ack_eliciting);
+    }
+
+    /// Update counters to account for a packet becoming acknowledged, lost, or abandoned
+    fn remove(&mut self, packet: &SentPacket) {
+        self.bytes -= u64::from(packet.size);
+        self.ack_eliciting -= u64::from(packet.ack_eliciting);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::net::{IpAddr, Ipv4Addr};
@@ -521,41 +558,5 @@ mod tests {
             ),
             None
         );
-    }
-}
-
-/// Summary statistics of packets that have been sent on a particular path, but which have not yet
-/// been acked or deemed lost
-pub(super) struct InFlight {
-    /// Sum of the sizes of all sent packets considered "in flight" by congestion control
-    ///
-    /// The size does not include IP or UDP overhead. Packets only containing ACK frames do not
-    /// count towards this to ensure congestion control does not impede congestion feedback.
-    pub(super) bytes: u64,
-    /// Number of packets in flight containing frames other than ACK and PADDING
-    ///
-    /// This can be 0 even when bytes is not 0 because PADDING frames cause a packet to be
-    /// considered "in flight" by congestion control. However, if this is nonzero, bytes will always
-    /// also be nonzero.
-    pub(super) ack_eliciting: u64,
-}
-
-impl InFlight {
-    fn new() -> Self {
-        Self {
-            bytes: 0,
-            ack_eliciting: 0,
-        }
-    }
-
-    fn insert(&mut self, packet: &SentPacket) {
-        self.bytes += u64::from(packet.size);
-        self.ack_eliciting += u64::from(packet.ack_eliciting);
-    }
-
-    /// Update counters to account for a packet becoming acknowledged, lost, or abandoned
-    fn remove(&mut self, packet: &SentPacket) {
-        self.bytes -= u64::from(packet.size);
-        self.ack_eliciting -= u64::from(packet.ack_eliciting);
     }
 }
