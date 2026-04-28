@@ -24,7 +24,7 @@ use tokio::sync::{
 use tracing::{Instrument, Span, debug_span};
 
 use crate::{
-    ConnectionEvent, Duration, Instant, VarInt,
+    ConnectionEvent, Duration, IO_LOOP_BOUND, Instant, VarInt,
     mutex::Mutex,
     recv_stream::RecvStream,
     runtime::{AsyncTimer, Runtime, UdpSender},
@@ -1077,7 +1077,7 @@ impl State {
                 }
             };
 
-            transmits += transmit_datagram_count(&t);
+            record_transmit_datagrams(&mut transmits, &t);
 
             let len = t.size;
             match self
@@ -1093,7 +1093,7 @@ impl State {
                 Poll::Ready(Ok(())) => {}
             }
 
-            if transmits >= MAX_TRANSMIT_DATAGRAMS {
+            if transmit_budget_exhausted(transmits) {
                 // Do one extra proto poll without sending it. If there is no more data, proto can
                 // enter app-limited state immediately; otherwise the produced transmit is sent on
                 // the next driver poll.
@@ -1364,7 +1364,7 @@ pub enum SendDatagramError {
 ///
 /// This limits the amount of CPU resources consumed by datagram generation,
 /// and allows other tasks (like receiving ACKs) to run in between.
-const MAX_TRANSMIT_DATAGRAMS: usize = 20;
+const MAX_TRANSMIT_DATAGRAMS: usize = IO_LOOP_BOUND;
 
 /// The maximum amount of datagrams that are sent in a single transmit
 ///
@@ -1380,13 +1380,24 @@ fn transmit_datagram_count(transmit: &proto::Transmit) -> usize {
     }
 }
 
+fn record_transmit_datagrams(transmits: &mut usize, transmit: &proto::Transmit) {
+    *transmits += transmit_datagram_count(transmit);
+}
+
+fn transmit_budget_exhausted(transmits: usize) -> bool {
+    transmits >= MAX_TRANSMIT_DATAGRAMS
+}
+
 #[cfg(test)]
 mod transmit_tests {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     use proto::Transmit;
 
-    use super::transmit_datagram_count;
+    use super::{
+        MAX_TRANSMIT_DATAGRAMS, MAX_TRANSMIT_SEGMENTS, record_transmit_datagrams,
+        transmit_budget_exhausted, transmit_datagram_count,
+    };
 
     fn transmit(size: usize, segment_size: Option<usize>) -> Transmit {
         Transmit {
@@ -1407,5 +1418,44 @@ mod transmit_tests {
     fn counts_gso_segments_rounding_up() {
         assert_eq!(transmit_datagram_count(&transmit(3600, Some(1200))), 3);
         assert_eq!(transmit_datagram_count(&transmit(3601, Some(1200))), 4);
+    }
+
+    #[test]
+    fn no_gso_budget_matches_io_loop_bound() {
+        assert_eq!(MAX_TRANSMIT_DATAGRAMS, crate::IO_LOOP_BOUND);
+        assert_eq!(MAX_TRANSMIT_DATAGRAMS, 160);
+
+        let mut transmits = 0;
+        let single = transmit(1200, None);
+        for _ in 0..MAX_TRANSMIT_DATAGRAMS - 1 {
+            record_transmit_datagrams(&mut transmits, &single);
+            assert!(!transmit_budget_exhausted(transmits));
+        }
+
+        record_transmit_datagrams(&mut transmits, &single);
+        assert_eq!(transmits, 160);
+        assert!(transmit_budget_exhausted(transmits));
+    }
+
+    #[test]
+    fn gso_batch_budget_is_segment_count() {
+        let mut transmits = 0;
+        record_transmit_datagrams(&mut transmits, &transmit(12_000, Some(1200)));
+
+        assert_eq!(transmits, MAX_TRANSMIT_SEGMENTS);
+        assert!(!transmit_budget_exhausted(transmits));
+    }
+
+    #[test]
+    fn buffered_transmit_consumes_budget_once_when_retried() {
+        let buffered = transmit(1200, None);
+        let newly_polled = transmit(1200, None);
+        let mut transmits = 0;
+
+        record_transmit_datagrams(&mut transmits, &buffered);
+        record_transmit_datagrams(&mut transmits, &newly_polled);
+
+        assert_eq!(transmits, 2);
+        assert!(!transmit_budget_exhausted(transmits));
     }
 }
