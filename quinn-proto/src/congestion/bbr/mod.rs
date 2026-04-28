@@ -43,7 +43,7 @@ pub struct Bbr {
     min_cwnd: u64,
     prev_in_flight_count: u64,
     exit_probe_rtt_at: Option<Instant>,
-    probe_rtt_last_started_at: Option<Instant>,
+    min_rtt_timestamp: Option<Instant>,
     min_rtt: Duration,
     exiting_quiescence: bool,
     pacing_rate: u64,
@@ -84,7 +84,7 @@ impl Bbr {
             min_cwnd: calculate_min_window(current_mtu as u64),
             prev_in_flight_count: 0,
             exit_probe_rtt_at: None,
-            probe_rtt_last_started_at: None,
+            min_rtt_timestamp: None,
             min_rtt: Default::default(),
             exiting_quiescence: false,
             pacing_rate: 0,
@@ -212,9 +212,8 @@ impl Bbr {
     fn is_min_rtt_expired(&self, now: Instant, app_limited: bool) -> bool {
         !app_limited
             && self
-                .probe_rtt_last_started_at
-                .map(|last| now.saturating_duration_since(last) > Duration::from_secs(10))
-                .unwrap_or(true)
+                .min_rtt_timestamp
+                .is_some_and(|last| now.saturating_duration_since(last) > K_MIN_RTT_EXPIRATION)
     }
 
     fn maybe_enter_or_exit_probe_rtt(
@@ -231,7 +230,7 @@ impl Bbr {
             // Do not decide on the time to exit ProbeRtt until the
             // |bytes_in_flight| is at the target small value.
             self.exit_probe_rtt_at = None;
-            self.probe_rtt_last_started_at = Some(now);
+            self.min_rtt_timestamp = Some(now);
         }
 
         if self.mode == Mode::ProbeRtt {
@@ -407,8 +406,12 @@ impl Controller for Bbr {
         self.max_bandwidth
             .on_ack(now, sent, bytes, self.round_count, app_limited);
         self.acked_bytes += bytes;
-        if self.is_min_rtt_expired(now, app_limited) || self.min_rtt > rtt.min() {
-            self.min_rtt = rtt.min();
+        let rtt_sample = rtt.latest();
+        if self.min_rtt_timestamp.is_none() || self.min_rtt > rtt_sample {
+            self.min_rtt = rtt_sample;
+            self.min_rtt_timestamp = Some(now);
+        } else if self.is_min_rtt_expired(now, app_limited) {
+            self.min_rtt = rtt_sample;
         }
     }
 
@@ -530,8 +533,11 @@ impl BbrConfig {
 
 impl Default for BbrConfig {
     fn default() -> Self {
+        let recommended_initial_window =
+            14720.clamp(2 * BASE_DATAGRAM_SIZE, 10 * BASE_DATAGRAM_SIZE);
         Self {
-            initial_window: K_MAX_INITIAL_CONGESTION_WINDOW * BASE_DATAGRAM_SIZE,
+            initial_window: recommended_initial_window
+                .min(K_MAX_INITIAL_CONGESTION_WINDOW * BASE_DATAGRAM_SIZE),
         }
     }
 }
@@ -646,6 +652,7 @@ const K_ROUND_TRIPS_WITHOUT_GROWTH_BEFORE_EXITING_STARTUP: u8 = 3;
 
 // Do not allow initial congestion window to be greater than 200 packets.
 const K_MAX_INITIAL_CONGESTION_WINDOW: u64 = 200;
+const K_MIN_RTT_EXPIRATION: Duration = Duration::from_secs(10);
 
 const PROBE_RTT_BASED_ON_BDP: bool = true;
 const DRAIN_TO_TARGET: bool = true;
@@ -687,5 +694,38 @@ mod tests {
         bbr.calculate_cwnd(1200, 0);
 
         assert_eq!(bbr.cwnd, target_window + 1);
+    }
+
+    #[test]
+    fn min_rtt_does_not_expire_before_first_sample() {
+        let bbr = Bbr::new(Arc::new(BbrConfig::default()), 1200);
+        assert!(!bbr.is_min_rtt_expired(
+            Instant::now() + K_MIN_RTT_EXPIRATION + Duration::from_millis(1),
+            false
+        ));
+    }
+
+    #[test]
+    fn min_rtt_expires_after_window() {
+        let now = Instant::now();
+        let mut bbr = Bbr::new(Arc::new(BbrConfig::default()), 1200);
+        bbr.min_rtt_timestamp = Some(now);
+
+        assert!(!bbr.is_min_rtt_expired(now + K_MIN_RTT_EXPIRATION, false));
+        assert!(
+            bbr.is_min_rtt_expired(now + K_MIN_RTT_EXPIRATION + Duration::from_millis(1), false)
+        );
+    }
+
+    #[test]
+    fn default_initial_window_uses_recommended_quic_initial_window() {
+        assert_eq!(
+            BbrConfig::default().initial_window,
+            14720.clamp(2 * BASE_DATAGRAM_SIZE, 10 * BASE_DATAGRAM_SIZE)
+        );
+        assert!(
+            BbrConfig::default().initial_window
+                < K_MAX_INITIAL_CONGESTION_WINDOW * BASE_DATAGRAM_SIZE
+        );
     }
 }
