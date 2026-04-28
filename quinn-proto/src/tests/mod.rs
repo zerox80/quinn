@@ -2068,6 +2068,11 @@ fn datagram_drop_send_respects_send_buffer_limit() {
             .send(vec![0; 9].into(), true),
         Err(SendDatagramError::TooLarge)
     );
+    assert_matches!(
+        pair.client_datagrams(client_ch)
+            .send(vec![0; 9].into(), false),
+        Err(SendDatagramError::TooLarge)
+    );
     assert_eq!(pair.client_datagrams(client_ch).send_buffer_space(), 8);
 }
 
