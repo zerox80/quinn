@@ -1454,7 +1454,9 @@ impl Connection {
         if ack.largest >= self.spaces[space].next_packet_number {
             return Err(TransportError::PROTOCOL_VIOLATION("unsent packet acked"));
         }
-        let new_largest = {
+        let active_path = self.path.generation();
+        let mut new_largest_active_path = false;
+        {
             let space = &mut self.spaces[space];
             if space.largest_acked_packet.is_none_or(|pn| ack.largest > pn) {
                 space.largest_acked_packet = Some(ack.largest);
@@ -1463,14 +1465,12 @@ impl Connection {
                     // haven't sent. At worst, that will result in us spuriously reducing the
                     // congestion window.
                     space.largest_acked_packet_sent = info.time_sent;
+                    new_largest_active_path = info.path_generation == active_path;
                 }
-                true
-            } else {
-                false
             }
         };
 
-        if self.detect_spurious_loss(&ack, space) {
+        if self.detect_spurious_loss(&ack, space, active_path) {
             self.stats.path.spurious_congestion_events += 1;
             self.path.congestion.on_spurious_congestion_event();
         }
@@ -1489,8 +1489,12 @@ impl Connection {
         }
 
         let mut ack_eliciting_acked = false;
+        let mut active_ack_eliciting_acked = false;
+        let mut active_newly_acked = 0;
+        let mut active_congestion_acked = false;
         for packet in newly_acked.elts() {
             if let Some(info) = self.spaces[space].take(packet) {
+                let active_path_packet = info.path_generation == active_path;
                 if let Some(acked) = info.largest_acked {
                     // Assume ACKs for all packets below the largest acknowledged in `packet` have
                     // been received. This can cause the peer to spuriously retransmit if some of
@@ -1500,30 +1504,36 @@ impl Connection {
                     self.spaces[space].pending_acks.subtract_below(acked);
                 }
                 ack_eliciting_acked |= info.ack_eliciting;
+                if active_path_packet {
+                    active_ack_eliciting_acked |= info.ack_eliciting;
+                    active_newly_acked += 1;
 
-                // Notify MTU discovery that a packet was acked, because it might be an MTU probe
-                let mtu_updated = self.path.mtud.on_acked(space, packet, info.size);
-                if mtu_updated {
-                    self.path
-                        .congestion
-                        .on_mtu_update(self.path.mtud.current_mtu());
+                    // Notify MTU discovery that a packet was acked, because it might be an MTU probe
+                    let mtu_updated = self.path.mtud.on_acked(space, packet, info.size);
+                    if mtu_updated {
+                        self.path
+                            .congestion
+                            .on_mtu_update(self.path.mtud.current_mtu());
+                    }
                 }
 
                 // Notify ack frequency that a packet was acked, because it might contain an ACK_FREQUENCY frame
                 self.ack_frequency.on_acked(packet);
 
-                self.on_packet_acked(now, info);
+                active_congestion_acked |= self.on_packet_acked(now, info, active_path_packet);
             }
         }
 
-        self.path.congestion.on_end_acks(
-            now,
-            self.path.in_flight.bytes,
-            self.app_limited,
-            self.spaces[space].largest_acked_packet,
-        );
+        if active_congestion_acked {
+            self.path.congestion.on_end_acks(
+                now,
+                self.path.in_flight.bytes,
+                self.app_limited,
+                self.spaces[space].largest_acked_packet,
+            );
+        }
 
-        if new_largest && ack_eliciting_acked {
+        if new_largest_active_path && active_ack_eliciting_acked {
             let ack_delay = if space != SpaceId::Data {
                 Duration::from_micros(0)
             } else {
@@ -1554,11 +1564,11 @@ impl Connection {
                 // order, allowing us to compute an increase in ECN counts to compare against the number
                 // of newly acked packets that remains well-defined in the presence of arbitrary packet
                 // reordering.
-                if new_largest {
+                if new_largest_active_path {
                     let sent = self.spaces[space].largest_acked_packet_sent;
-                    self.process_ecn(now, space, newly_acked.len() as u64, ecn, sent);
+                    self.process_ecn(now, space, active_newly_acked, ecn, sent);
                 }
-            } else {
+            } else if active_newly_acked != 0 {
                 // We always start out sending ECN, so any ack that doesn't acknowledge it disables it.
                 debug!("ECN not acknowledged by peer");
                 self.path.sending_ecn = false;
@@ -1569,21 +1579,25 @@ impl Connection {
         Ok(())
     }
 
-    fn detect_spurious_loss(&mut self, ack: &frame::Ack, space: SpaceId) -> bool {
+    fn detect_spurious_loss(&mut self, ack: &frame::Ack, space: SpaceId, active_path: u64) -> bool {
         let lost_packets = &mut self.spaces[space].lost_packets;
 
         if lost_packets.is_empty() {
             return false;
         }
 
+        let had_active_loss = lost_packets
+            .values()
+            .any(|info| info.path_generation == active_path);
+        let mut active_loss_acked = false;
         for range in ack.iter() {
-            let spurious_losses: Vec<u64> = lost_packets
+            let spurious_losses: Vec<_> = lost_packets
                 .range(range.clone())
-                .map(|(pn, _info)| pn)
-                .copied()
+                .map(|(&pn, info)| (pn, info.path_generation == active_path))
                 .collect();
 
-            for pn in spurious_losses {
+            for (pn, active_path_packet) in spurious_losses {
+                active_loss_acked |= active_path_packet;
                 lost_packets.remove(&pn);
             }
         }
@@ -1592,7 +1606,11 @@ impl Connection {
         // then we have raised a spurious congestion event in the past.
         // We cannot conclude when there are remaining packets,
         // but future ACK frames might indicate a spurious loss detection.
-        lost_packets.is_empty()
+        had_active_loss
+            && active_loss_acked
+            && !lost_packets
+                .values()
+                .any(|info| info.path_generation == active_path)
     }
 
     /// Drain lost packets that we reasonably think will never arrive
@@ -1635,9 +1653,16 @@ impl Connection {
 
     // Not timing-aware, so it's safe to call this for inferred acks, such as arise from
     // high-latency handshakes
-    fn on_packet_acked(&mut self, now: Instant, info: SentPacket) {
+    fn on_packet_acked(
+        &mut self,
+        now: Instant,
+        info: SentPacket,
+        active_path_packet: bool,
+    ) -> bool {
         self.remove_in_flight(&info);
-        if info.ack_eliciting && self.path.challenge.is_none() {
+        let update_congestion =
+            active_path_packet && info.ack_eliciting && self.path.challenge.is_none();
+        if update_congestion {
             // Only pass ACKs to the congestion controller if we are not validating the current
             // path, so as to ignore any ACKs from older paths still coming in.
             self.path.congestion.on_ack(
@@ -1659,6 +1684,8 @@ impl Connection {
         for frame in info.stream_frames {
             self.streams.received_ack_of(frame);
         }
+
+        update_congestion
     }
 
     fn set_key_discard_timer(&mut self, now: Instant, space: SpaceId) {
@@ -1714,6 +1741,7 @@ impl Connection {
     fn detect_lost_packets(&mut self, now: Instant, pn_space: SpaceId, due_to_ack: bool) {
         let mut lost_packets = Vec::<u64>::new();
         let mut lost_mtu_probe = None;
+        let active_path = self.path.generation();
         let in_flight_mtu_probe = self.path.mtud.in_flight_mtu_probe();
         let rtt = self.path.rtt.conservative();
         let loss_delay = cmp::max(rtt.mul_f32(self.config.time_threshold), TIMER_GRANULARITY);
@@ -1721,6 +1749,7 @@ impl Connection {
         let largest_acked_packet = self.spaces[pn_space].largest_acked_packet.unwrap();
         let packet_threshold = self.config.packet_threshold as u64;
         let mut size_of_lost_packets = 0u64;
+        let mut active_size_of_lost_packets = 0u64;
 
         // InPersistentCongestion: Determine if all packets in the time period before the newest
         // lost packet, including the edges, are marked lost. PTO computation must always
@@ -1731,11 +1760,13 @@ impl Connection {
         let mut persistent_congestion_start: Option<Instant> = None;
         let mut prev_packet = None;
         let mut in_persistent_congestion = false;
+        let mut active_largest_lost_sent = None;
 
         let space = &mut self.spaces[pn_space];
         space.loss_time = None;
 
         for (&packet, info) in space.sent_packets.range(0..largest_acked_packet) {
+            let active_path_packet = info.path_generation == active_path;
             if prev_packet != Some(packet.wrapping_sub(1)) {
                 // An intervening packet was acknowledged
                 persistent_congestion_start = None;
@@ -1746,14 +1777,18 @@ impl Connection {
             // saturating equivalent of this substraction operation with a Duration.
             let packet_too_old = now.saturating_duration_since(info.time_sent) >= loss_delay;
             if packet_too_old || largest_acked_packet >= packet + packet_threshold {
-                if Some(packet) == in_flight_mtu_probe {
+                if active_path_packet && Some(packet) == in_flight_mtu_probe {
                     // Lost MTU probes are not included in `lost_packets`, because they should not
                     // trigger a congestion control response
                     lost_mtu_probe = in_flight_mtu_probe;
                 } else {
                     lost_packets.push(packet);
                     size_of_lost_packets += info.size as u64;
-                    if info.ack_eliciting && due_to_ack {
+                    if active_path_packet {
+                        active_size_of_lost_packets += info.size as u64;
+                        active_largest_lost_sent = Some(info.time_sent);
+                    }
+                    if active_path_packet && info.ack_eliciting && due_to_ack {
                         match persistent_congestion_start {
                             // Two ACK-eliciting packets lost more than congestion_period apart, with no
                             // ACKed packets in between
@@ -1788,9 +1823,8 @@ impl Connection {
         self.drain_lost_packets(now, pn_space);
 
         // OnPacketsLost
-        if let Some(largest_lost) = lost_packets.last().cloned() {
+        if !lost_packets.is_empty() {
             let old_bytes_in_flight = self.path.in_flight.bytes;
-            let largest_lost_sent = self.spaces[pn_space].sent_packets[&largest_lost].time_sent;
             self.stats.path.lost_packets += lost_packets.len() as u64;
             self.stats.path.lost_bytes += size_of_lost_packets;
             trace!(
@@ -1798,8 +1832,10 @@ impl Connection {
                 lost_packets, size_of_lost_packets
             );
 
+            let mut active_non_probe_lost = false;
             for &packet in &lost_packets {
                 let info = self.spaces[pn_space].take(packet).unwrap(); // safe: lost_packets is populated just above
+                let active_path_packet = info.path_generation == active_path;
                 self.config.qlog_sink.emit_packet_lost(
                     packet,
                     &info,
@@ -1814,17 +1850,21 @@ impl Connection {
                     self.streams.retransmit(frame);
                 }
                 self.spaces[pn_space].pending |= info.retransmits;
-                self.path.mtud.on_non_probe_lost(packet, info.size);
+                if active_path_packet {
+                    self.path.mtud.on_non_probe_lost(packet, info.size);
+                    active_non_probe_lost = true;
+                }
 
                 self.spaces[pn_space].lost_packets.insert(
                     packet,
                     LostPacket {
+                        path_generation: info.path_generation,
                         time_sent: info.time_sent,
                     },
                 );
             }
 
-            if self.path.mtud.black_hole_detected(now) {
+            if active_non_probe_lost && self.path.mtud.black_hole_detected(now) {
                 self.stats.path.black_holes_detected += 1;
                 self.path
                     .congestion
@@ -1846,10 +1886,10 @@ impl Connection {
                 self.stats.path.congestion_events += 1;
                 self.path.congestion.on_congestion_event(
                     now,
-                    largest_lost_sent,
+                    active_largest_lost_sent.unwrap(),
                     in_persistent_congestion,
                     false,
-                    size_of_lost_packets,
+                    active_size_of_lost_packets,
                 );
             }
         }
@@ -2617,7 +2657,8 @@ impl Connection {
 
                 let space = &mut self.spaces[SpaceId::Initial];
                 if let Some(info) = space.take(0) {
-                    self.on_packet_acked(now, info);
+                    let active_path_packet = info.path_generation == self.path.generation();
+                    self.on_packet_acked(now, info, active_path_packet);
                 };
 
                 self.discard_space(now, SpaceId::Initial); // Make sure we clean up after any retransmitted Initials
