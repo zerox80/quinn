@@ -198,7 +198,7 @@ impl UdpSocketState {
     /// instead.
     pub fn send(&self, socket: UdpSockRef<'_>, transmit: &Transmit<'_>) -> io::Result<()> {
         match send(
-            socket,
+            &socket,
             transmit,
             self.ecn_v4_supported,
             self.ecn_v6_supported,
@@ -206,6 +206,10 @@ impl UdpSocketState {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => Err(e),
             Err(e) => {
+                if transmit.effective_segment_size().is_some() {
+                    self.disable_gso();
+                    debug!("quinn-udp: GSO disabled after WSASendMsg error: {e}");
+                }
                 log_sendmsg_error(&self.last_send_error, e, transmit);
 
                 Ok(())
@@ -216,7 +220,7 @@ impl UdpSocketState {
     /// Sends a [`Transmit`] on the given socket without any additional error handling.
     pub fn try_send(&self, socket: UdpSockRef<'_>, transmit: &Transmit<'_>) -> io::Result<()> {
         send(
-            socket,
+            &socket,
             transmit,
             self.ecn_v4_supported,
             self.ecn_v6_supported,
@@ -340,6 +344,10 @@ impl UdpSocketState {
         self.max_gso_segments.load(Ordering::Relaxed)
     }
 
+    fn disable_gso(&self) {
+        self.max_gso_segments.store(1, Ordering::Relaxed);
+    }
+
     /// The number of segments to read when GRO is enabled. Used as a factor to
     /// compute the receive buffer size.
     ///
@@ -381,7 +389,7 @@ impl UdpSocketState {
 }
 
 fn send(
-    socket: UdpSockRef<'_>,
+    socket: &UdpSockRef<'_>,
     transmit: &Transmit<'_>,
     ecn_v4_supported: bool,
     ecn_v6_supported: bool,
@@ -565,8 +573,11 @@ fn max_gso_segments(socket: &impl AsRawSocket) -> usize {
         WinSock::UDP_SEND_MSG_SIZE,
         GSO_SIZE,
     ) {
-        // Empirically found on Windows 11 x64
-        Ok(()) => 512,
+        Ok(()) => {
+            let _ = set_socket_option(socket, WinSock::IPPROTO_UDP, WinSock::UDP_SEND_MSG_SIZE, 0);
+            // Empirically found on Windows 11 x64
+            512
+        }
         Err(_) => 1,
     }
 }
