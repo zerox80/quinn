@@ -1071,17 +1071,13 @@ impl State {
                         .inner
                         .poll_transmit(now, max_datagrams, &mut self.send_buffer)
                     {
-                        Some(t) => {
-                            transmits += match t.segment_size {
-                                None => 1,
-                                Some(s) => t.size.div_ceil(s), // round up
-                            };
-                            t
-                        }
+                        Some(t) => t,
                         None => break,
                     }
                 }
             };
+
+            transmits += transmit_datagram_count(&t);
 
             let len = t.size;
             match self
@@ -1376,3 +1372,40 @@ const MAX_TRANSMIT_DATAGRAMS: usize = 20;
 /// memory allocations when calling `poll_transmit()`. Benchmarks have shown
 /// that numbers around 10 are a good compromise.
 const MAX_TRANSMIT_SEGMENTS: usize = 10;
+
+fn transmit_datagram_count(transmit: &proto::Transmit) -> usize {
+    match transmit.segment_size {
+        None => 1,
+        Some(segment_size) => transmit.size.div_ceil(segment_size),
+    }
+}
+
+#[cfg(test)]
+mod transmit_tests {
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    use proto::Transmit;
+
+    use super::transmit_datagram_count;
+
+    fn transmit(size: usize, segment_size: Option<usize>) -> Transmit {
+        Transmit {
+            destination: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 4433),
+            size,
+            ecn: None,
+            segment_size,
+            src_ip: None,
+        }
+    }
+
+    #[test]
+    fn counts_single_transmit_as_one_datagram() {
+        assert_eq!(transmit_datagram_count(&transmit(1200, None)), 1);
+    }
+
+    #[test]
+    fn counts_gso_segments_rounding_up() {
+        assert_eq!(transmit_datagram_count(&transmit(3600, Some(1200))), 3);
+        assert_eq!(transmit_datagram_count(&transmit(3601, Some(1200))), 4);
+    }
+}
