@@ -1378,6 +1378,140 @@ fn migration() {
     );
 }
 
+fn migrate_client_to_new_port(
+    pair: &mut Pair,
+    client_ch: ConnectionHandle,
+    server_ch: ConnectionHandle,
+) {
+    pair.client.addr = SocketAddr::new(
+        Ipv4Addr::new(127, 0, 0, 1).into(),
+        CLIENT_PORTS.lock().unwrap().next().unwrap(),
+    );
+    pair.client_conn_mut(client_ch).ping();
+    pair.drive();
+
+    assert_eq!(
+        pair.server_conn_mut(server_ch).remote_address(),
+        pair.client.addr
+    );
+}
+
+fn drain_client_ack_packets(pair: &mut Pair) -> Vec<(Transmit, Bytes)> {
+    pair.client.drive(pair.time, pair.server.addr);
+    if pair.client.outbound.is_empty() {
+        pair.time = pair.client.next_wakeup().unwrap();
+        pair.client.drive_outgoing(pair.time);
+    }
+
+    let packets = pair.client.outbound.drain(..).collect::<Vec<_>>();
+    assert!(!packets.is_empty());
+    packets
+}
+
+fn deliver_to_server_from(pair: &mut Pair, remote: SocketAddr, packets: Vec<(Transmit, Bytes)>) {
+    for (packet, buffer) in packets {
+        assert_eq!(packet.destination, pair.server.addr);
+        pair.server
+            .inbound
+            .push_back((pair.time, packet.ecn, BytesMut::from(buffer.as_ref())));
+    }
+    pair.server.drive(pair.time, remote);
+}
+
+#[test]
+fn old_path_ack_after_migration_does_not_update_active_path() {
+    let _guard = subscribe();
+    let mut pair = Pair::default_with_deterministic_pns();
+    let (client_ch, server_ch) = pair.connect_with(client_config_with_deterministic_pns());
+    pair.drive();
+
+    let old_client_addr = pair.client.addr;
+
+    pair.server_conn_mut(server_ch).ping();
+    pair.drive_server();
+    let old_path_acks = drain_client_ack_packets(&mut pair);
+
+    migrate_client_to_new_port(&mut pair, client_ch, server_ch);
+
+    let mtu_before = pair.server_conn_mut(server_ch).path_mtu();
+    let congestion_window_before = pair.server_conn_mut(server_ch).congestion_window();
+    let stats_before = pair.server_conn_mut(server_ch).stats();
+
+    deliver_to_server_from(&mut pair, old_client_addr, old_path_acks);
+
+    let server = pair.server_conn_mut(server_ch);
+    let stats_after = server.stats();
+    assert!(
+        stats_after.frame_rx.acks > stats_before.frame_rx.acks,
+        "old-path ACK was not processed"
+    );
+    assert_eq!(server.path_mtu(), mtu_before);
+    assert_eq!(server.congestion_window(), congestion_window_before);
+    assert_eq!(
+        stats_after.path.congestion_events,
+        stats_before.path.congestion_events
+    );
+}
+
+#[test]
+fn old_path_losses_after_migration_do_not_update_active_path() {
+    let _guard = subscribe();
+    let mut pair = Pair::default_with_deterministic_pns();
+    let (client_ch, server_ch) = pair.connect_with(client_config_with_deterministic_pns());
+    pair.drive();
+
+    let old_client_addr = pair.client.addr;
+    let stream = pair.server_streams(server_ch).open(Dir::Uni).unwrap();
+
+    for i in 0..4 {
+        pair.server_send(server_ch, stream)
+            .write(&[i; 1300])
+            .unwrap();
+        pair.server.drive_outgoing(pair.time);
+        assert!(!pair.server.outbound.is_empty());
+        pair.server.outbound.clear();
+
+        pair.server_conn_mut(server_ch).ping();
+        pair.drive_server();
+    }
+
+    let old_path_acks = drain_client_ack_packets(&mut pair);
+
+    pair.client.addr = SocketAddr::new(
+        Ipv4Addr::new(127, 0, 0, 1).into(),
+        CLIENT_PORTS.lock().unwrap().next().unwrap(),
+    );
+    pair.client_conn_mut(client_ch).ping();
+    pair.drive_client();
+    pair.server.drive(pair.time, pair.client.addr);
+    pair.server.outbound.clear();
+    assert_eq!(
+        pair.server_conn_mut(server_ch).remote_address(),
+        pair.client.addr
+    );
+
+    let mtu_before = pair.server_conn_mut(server_ch).path_mtu();
+    let stats_before = pair.server_conn_mut(server_ch).stats();
+
+    deliver_to_server_from(&mut pair, old_client_addr, old_path_acks);
+
+    let server = pair.server_conn_mut(server_ch);
+    let stats_after = server.stats();
+    assert!(
+        stats_after.path.lost_packets > stats_before.path.lost_packets,
+        "old-path losses were not declared"
+    );
+    assert_eq!(server.path_mtu(), mtu_before);
+    assert_eq!(
+        stats_after.path.black_holes_detected,
+        stats_before.path.black_holes_detected
+    );
+    assert_eq!(
+        stats_after.path.congestion_events,
+        stats_before.path.congestion_events
+    );
+}
+
 fn test_flow_control(config: TransportConfig, window_size: usize) {
     let _guard = subscribe();
     let mut pair = Pair::new(

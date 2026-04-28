@@ -312,6 +312,8 @@ pub(super) struct SentPacket {
 /// Represents one or more packets that are deemed lost.
 #[derive(Debug)]
 pub(super) struct LostPacket {
+    /// [`PathData::generation`](super::PathData::generation) of the path on which this packet was sent
+    pub(super) path_generation: u64,
     /// The time the packet was sent.
     pub(super) time_sent: Instant,
 }
