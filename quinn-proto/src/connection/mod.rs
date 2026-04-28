@@ -253,6 +253,7 @@ pub struct Connection {
 struct BufferedHandshakePacket {
     received_at: Instant,
     remote: SocketAddr,
+    local_ip: Option<IpAddr>,
     number: u64,
     packet: Packet,
 }
@@ -891,35 +892,37 @@ impl Connection {
 
             // Send an off-path PATH_RESPONSE. Prioritized over on-path data to ensure that path
             // validation can occur while the link is saturated.
-            if space_id == SpaceId::Data
-                && num_datagrams == 1
-                && let Some((token, remote)) = self.path_responses.pop_off_path(self.path.remote)
-            {
-                // `unwrap` guaranteed to succeed because `builder_storage` was populated just
-                // above.
-                let mut builder = builder_storage.take().unwrap();
-                trace!("PATH_RESPONSE {:08x} (off-path)", token);
-                buf.write(frame::FrameType::PATH_RESPONSE);
-                buf.write(token);
-                self.stats.frame_tx.path_response += 1;
-                builder.pad_to(MIN_INITIAL_SIZE);
-                builder.finish_and_track(
-                    now,
-                    self,
-                    Some(SentFrames {
-                        non_retransmits: true,
-                        ..SentFrames::default()
-                    }),
-                    buf,
-                );
-                self.stats.udp_tx.on_sent(1, buf.len());
-                return Some(Transmit {
-                    destination: remote,
-                    size: buf.len(),
-                    ecn: None,
-                    segment_size: None,
-                    src_ip: self.local_ip,
-                });
+            if space_id == SpaceId::Data && num_datagrams == 1 {
+                if let Some((token, remote, local_ip)) = self
+                    .path_responses
+                    .pop_off_path(self.path.remote, self.local_ip)
+                {
+                    // `unwrap` guaranteed to succeed because `builder_storage` was populated just
+                    // above.
+                    let mut builder = builder_storage.take().unwrap();
+                    trace!("PATH_RESPONSE {:08x} (off-path)", token);
+                    buf.write(frame::FrameType::PATH_RESPONSE);
+                    buf.write(token);
+                    self.stats.frame_tx.path_response += 1;
+                    builder.pad_to(MIN_INITIAL_SIZE);
+                    builder.finish_and_track(
+                        now,
+                        self,
+                        Some(SentFrames {
+                            non_retransmits: true,
+                            ..SentFrames::default()
+                        }),
+                        buf,
+                    );
+                    self.stats.udp_tx.on_sent(1, buf.len());
+                    return Some(Transmit {
+                        destination: remote,
+                        size: buf.len(),
+                        ecn: None,
+                        segment_size: None,
+                        src_ip: local_ip,
+                    });
+                }
             }
 
             let sent =
@@ -1160,6 +1163,7 @@ impl Connection {
             Datagram(DatagramConnectionEvent {
                 now,
                 remote,
+                local_ip,
                 ecn,
                 first_decode,
                 remaining,
@@ -1178,7 +1182,7 @@ impl Connection {
                 self.stats.udp_rx.bytes += first_decode.len() as u64;
                 let data_len = first_decode.len();
 
-                self.handle_decode(now, remote, ecn, first_decode);
+                self.handle_decode(now, remote, local_ip, ecn, first_decode);
                 // The current `path` might have changed inside `handle_decode`,
                 // since the packet could have triggered a migration. Make sure
                 // the data received is accounted for the most recent path by accessing
@@ -1187,7 +1191,7 @@ impl Connection {
 
                 if let Some(data) = remaining {
                     self.stats.udp_rx.bytes += data.len() as u64;
-                    self.handle_coalesced(now, remote, ecn, data);
+                    self.handle_coalesced(now, remote, local_ip, ecn, data);
                 }
 
                 self.config.qlog_sink.emit_recovery_metrics(
@@ -2108,6 +2112,7 @@ impl Connection {
         &mut self,
         now: Instant,
         remote: SocketAddr,
+        local_ip: Option<IpAddr>,
         ecn: Option<EcnCodepoint>,
         packet_number: u64,
         packet: InitialPacket,
@@ -2135,9 +2140,9 @@ impl Connection {
             false,
         );
 
-        self.process_decrypted_packet(now, remote, Some(packet_number), packet.into())?;
+        self.process_decrypted_packet(now, remote, local_ip, Some(packet_number), packet.into())?;
         if let Some(data) = remaining {
-            self.handle_coalesced(now, remote, ecn, data);
+            self.handle_coalesced(now, remote, local_ip, ecn, data);
         }
 
         self.config.qlog_sink.emit_recovery_metrics(
@@ -2326,6 +2331,7 @@ impl Connection {
         &mut self,
         now: Instant,
         remote: SocketAddr,
+        local_ip: Option<IpAddr>,
         ecn: Option<EcnCodepoint>,
         data: BytesMut,
     ) {
@@ -2340,7 +2346,7 @@ impl Connection {
             ) {
                 Ok((partial_decode, rest)) => {
                     remaining = rest;
-                    self.handle_decode(now, remote, ecn, partial_decode);
+                    self.handle_decode(now, remote, local_ip, ecn, partial_decode);
                 }
                 Err(e) => {
                     trace!("malformed header: {}", e);
@@ -2354,6 +2360,7 @@ impl Connection {
         &mut self,
         now: Instant,
         remote: SocketAddr,
+        local_ip: Option<IpAddr>,
         ecn: Option<EcnCodepoint>,
         partial_decode: PartialDecode,
     ) {
@@ -2363,7 +2370,14 @@ impl Connection {
             self.zero_rtt_crypto.as_ref(),
             self.peer_params.stateless_reset_token,
         ) {
-            self.handle_packet(now, remote, ecn, decoded.packet, decoded.stateless_reset);
+            self.handle_packet(
+                now,
+                remote,
+                local_ip,
+                ecn,
+                decoded.packet,
+                decoded.stateless_reset,
+            );
         }
     }
 
@@ -2371,6 +2385,7 @@ impl Connection {
         &mut self,
         now: Instant,
         remote: SocketAddr,
+        local_ip: Option<IpAddr>,
         ecn: Option<EcnCodepoint>,
         packet: Option<Packet>,
         stateless_reset: bool,
@@ -2438,7 +2453,7 @@ impl Connection {
                             Header::Short { spin, .. } => spin,
                             _ => unreachable!("checked is_short above"),
                         };
-                        if self.buffer_handshake_1rtt_packet(now, remote, pn, packet) {
+                        if self.buffer_handshake_1rtt_packet(now, remote, local_ip, pn, packet) {
                             self.on_packet_authenticated(
                                 now,
                                 SpaceId::Data,
@@ -2484,7 +2499,7 @@ impl Connection {
                     );
                 }
 
-                self.process_decrypted_packet(now, remote, number, packet)
+                self.process_decrypted_packet(now, remote, local_ip, number, packet)
             }
         };
 
@@ -2539,6 +2554,7 @@ impl Connection {
         &mut self,
         received_at: Instant,
         remote: SocketAddr,
+        local_ip: Option<IpAddr>,
         number: u64,
         packet: Packet,
     ) -> bool {
@@ -2547,7 +2563,7 @@ impl Connection {
             return false;
         }
 
-        if !self.spaces[SpaceId::Data].dedup.insert(number) {
+        if self.spaces[SpaceId::Data].dedup.insert(number) {
             debug!("discarding possible duplicate packet");
             return false;
         }
@@ -2557,6 +2573,7 @@ impl Connection {
             .push_back(BufferedHandshakePacket {
                 received_at,
                 remote,
+                local_ip,
                 number,
                 packet,
             });
@@ -2571,6 +2588,7 @@ impl Connection {
             self.process_payload(
                 cmp::max(buffered.received_at, now),
                 buffered.remote,
+                buffered.local_ip,
                 buffered.number,
                 buffered.packet,
             )?;
@@ -2582,13 +2600,16 @@ impl Connection {
         &mut self,
         now: Instant,
         remote: SocketAddr,
+        local_ip: Option<IpAddr>,
         number: Option<u64>,
         packet: Packet,
     ) -> Result<(), ConnectionError> {
         let state = match &mut self.state {
             State::Established => {
                 match packet.header.space() {
-                    SpaceId::Data => self.process_payload(now, remote, number.unwrap(), packet)?,
+                    SpaceId::Data => {
+                        self.process_payload(now, remote, local_ip, number.unwrap(), packet)?
+                    }
                     _ if packet.header.has_frames() => self.process_early_payload(now, packet)?,
                     _ => {
                         trace!("discarding unexpected pre-handshake packet");
@@ -2813,7 +2834,7 @@ impl Connection {
                 ty: LongType::ZeroRtt,
                 ..
             } => {
-                self.process_payload(now, remote, number.unwrap(), packet)?;
+                self.process_payload(now, remote, local_ip, number.unwrap(), packet)?;
                 Ok(())
             }
             Header::VersionNegotiate { .. } => {
@@ -2901,6 +2922,7 @@ impl Connection {
         &mut self,
         now: Instant,
         remote: SocketAddr,
+        local_ip: Option<IpAddr>,
         number: u64,
         packet: Packet,
     ) -> Result<(), TransportError> {
@@ -2972,7 +2994,7 @@ impl Connection {
                     close = Some(reason);
                 }
                 Frame::PathChallenge(token) => {
-                    self.path_responses.push(number, token, remote);
+                    self.path_responses.push(number, token, remote, local_ip);
                     if remote == self.path.remote {
                         // PATH_CHALLENGE on active path, possible off-path packet forwarding
                         // attack. Send a non-probing packet to recover the active path.
@@ -3405,16 +3427,18 @@ impl Connection {
         }
 
         // PATH_RESPONSE
-        if buf.len() + 9 < max_size
-            && space_id == SpaceId::Data
-            && let Some(token) = self.path_responses.pop_on_path(self.path.remote)
-        {
-            sent.non_retransmits = true;
-            sent.requires_padding = true;
-            trace!("PATH_RESPONSE {:08x}", token);
-            buf.write(frame::FrameType::PATH_RESPONSE);
-            buf.write(token);
-            self.stats.frame_tx.path_response += 1;
+        if buf.len() + 9 < max_size && space_id == SpaceId::Data {
+            if let Some(token) = self
+                .path_responses
+                .pop_on_path(self.path.remote, self.local_ip)
+            {
+                sent.non_retransmits = true;
+                sent.requires_padding = true;
+                trace!("PATH_RESPONSE {:08x}", token);
+                buf.write(frame::FrameType::PATH_RESPONSE);
+                buf.write(token);
+                self.stats.frame_tx.path_response += 1;
+            }
         }
 
         // CRYPTO
