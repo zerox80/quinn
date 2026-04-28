@@ -524,7 +524,8 @@ pub struct BbrConfig {
 impl BbrConfig {
     /// Default limit on the amount of outstanding data in bytes.
     ///
-    /// Recommended value: `min(10 * max_datagram_size, max(2 * max_datagram_size, 14720))`
+    /// BBR defaults to a larger startup window than loss-based controllers to
+    /// preserve fast ramp-up on high-bandwidth or high-RTT paths.
     pub fn initial_window(&mut self, value: u64) -> &mut Self {
         self.initial_window = value;
         self
@@ -533,11 +534,8 @@ impl BbrConfig {
 
 impl Default for BbrConfig {
     fn default() -> Self {
-        let recommended_initial_window =
-            14720.clamp(2 * BASE_DATAGRAM_SIZE, 10 * BASE_DATAGRAM_SIZE);
         Self {
-            initial_window: recommended_initial_window
-                .min(K_MAX_INITIAL_CONGESTION_WINDOW * BASE_DATAGRAM_SIZE),
+            initial_window: K_MAX_INITIAL_CONGESTION_WINDOW * BASE_DATAGRAM_SIZE,
         }
     }
 }
@@ -718,14 +716,10 @@ mod tests {
     }
 
     #[test]
-    fn default_initial_window_uses_recommended_quic_initial_window() {
+    fn default_initial_window_preserves_bbr_startup_window() {
         assert_eq!(
             BbrConfig::default().initial_window,
-            14720.clamp(2 * BASE_DATAGRAM_SIZE, 10 * BASE_DATAGRAM_SIZE)
-        );
-        assert!(
-            BbrConfig::default().initial_window
-                < K_MAX_INITIAL_CONGESTION_WINDOW * BASE_DATAGRAM_SIZE
+            K_MAX_INITIAL_CONGESTION_WINDOW * BASE_DATAGRAM_SIZE
         );
     }
 }
