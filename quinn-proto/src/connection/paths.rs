@@ -489,6 +489,45 @@ mod tests {
         responses.push(2, 0x22, remote, local_a);
         assert_eq!(responses.pop_on_path(remote, local_a), Some(0x22));
     }
+
+    #[test]
+    fn reset_refreshes_pacer_budget() {
+        let now = Instant::now();
+        let config = TransportConfig::default();
+        let remote = "203.0.113.1:4433".parse().unwrap();
+        let mut path = PathData::new(remote, true, None, 0, now, &config);
+        let mtu = path.current_mtu();
+        let window = path.congestion.window();
+
+        for _ in 0..1000 {
+            if path
+                .pacing
+                .delay(path.rtt.get(), mtu.into(), mtu, window, now)
+                .is_some()
+            {
+                break;
+            }
+            path.pacing.on_transmit(mtu);
+        }
+        assert!(
+            path.pacing
+                .delay(path.rtt.get(), mtu.into(), mtu, window, now)
+                .is_some()
+        );
+
+        path.reset(now, &config);
+
+        assert_eq!(
+            path.pacing.delay(
+                path.rtt.get(),
+                path.current_mtu().into(),
+                path.current_mtu(),
+                path.congestion.window(),
+                now
+            ),
+            None
+        );
+    }
 }
 
 /// Summary statistics of packets that have been sent on a particular path, but which have not yet
