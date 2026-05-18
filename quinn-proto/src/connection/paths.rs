@@ -322,7 +322,7 @@ pub struct RttEstimator {
 }
 
 impl RttEstimator {
-    fn new(initial_rtt: Duration) -> Self {
+    pub(crate) fn new(initial_rtt: Duration) -> Self {
         Self {
             latest: initial_rtt,
             smoothed: None,
