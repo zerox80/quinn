@@ -10,7 +10,7 @@ use std::{
 use bytes::{Bytes, BytesMut};
 use frame::StreamMetaVec;
 
-use rand::{Rng, SeedableRng, rngs::StdRng};
+use rand::{RngExt, SeedableRng, rngs::StdRng};
 use thiserror::Error;
 use tracing::{debug, error, trace, trace_span, warn};
 
@@ -1216,6 +1216,7 @@ impl Connection {
                     debug!("path validation failed");
                     if let Some((_, prev)) = self.prev_path.take() {
                         self.path = prev;
+                        self.set_loss_detection_timer(now);
                     }
                     self.path.challenge = None;
                     self.path.challenge_pending = false;
