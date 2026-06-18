@@ -839,9 +839,21 @@ fn alpn_success() {
         .crypto_session()
         .handshake_data()
         .unwrap()
-        .downcast::<crate::crypto::rustls::HandshakeData>()
+        .downcast::<crypto::rustls::HandshakeData>()
         .unwrap();
     assert_eq!(hd.protocol.unwrap(), &b"bar"[..]);
+    assert_eq!(
+        hd.protocol_version
+            .unwrap()
+            .downcast_ref::<rustls::ProtocolVersion>(),
+        Some(&rustls::ProtocolVersion::TLSv1_3)
+    );
+    assert!(
+        hd.cipher_suite
+            .unwrap()
+            .downcast_ref::<rustls::CipherSuite>()
+            .is_some()
+    );
 }
 
 #[test]
@@ -2263,6 +2275,28 @@ fn datagram_recv_buffer_overflow() {
 }
 
 #[test]
+fn datagram_larger_than_send_buffer_is_too_large() {
+    let _guard = subscribe();
+    let mut pair = Pair::default();
+    let mut client_config = client_config();
+    let mut transport_config = TransportConfig::default();
+    transport_config.datagram_send_buffer_size(1);
+    client_config.transport_config(transport_config.into());
+    let (client_ch, _) = pair.connect_with(client_config);
+
+    assert_matches!(
+        pair.client_datagrams(client_ch)
+            .send(Bytes::from_static(&[0; 2]), true),
+        Err(SendDatagramError::TooLarge)
+    );
+    assert_matches!(
+        pair.client_datagrams(client_ch)
+            .send(Bytes::from_static(&[0; 2]), false),
+        Err(SendDatagramError::TooLarge)
+    );
+}
+
+#[test]
 fn datagram_unsupported() {
     let _guard = subscribe();
     let server = ServerConfig {
@@ -3413,6 +3447,30 @@ fn pure_sender_voluntarily_acks() {
 
     let receiver_acks_final = pair.server_conn_mut(server_ch).stats().frame_rx.acks;
     assert!(receiver_acks_final > receiver_acks_initial);
+}
+
+/// Initials rejected under saturation (here via `max_incoming(0)`) are dropped without
+/// sending a response: the client times out rather than receiving a CONNECTION_REFUSED.
+#[test]
+fn silently_drop_rejected_initials() {
+    let _guard = subscribe();
+    let mut server_config = server_config();
+    server_config.max_incoming(0);
+    let mut pair = Pair::new(Arc::new(EndpointConfig::default()), server_config);
+
+    let client_ch = pair.begin_connect(client_config());
+    pair.drive();
+    pair.server.assert_no_accept();
+    // `drive()` stops once the client's only remaining timer is its idle timeout; advance
+    // past it so the unanswered attempt gives up.
+    pair.time += Duration::from_secs(60);
+    pair.drive();
+    assert_matches!(
+        pair.client_conn_mut(client_ch).poll(),
+        Some(Event::ConnectionLost {
+            reason: ConnectionError::TimedOut,
+        })
+    );
 }
 
 #[test]

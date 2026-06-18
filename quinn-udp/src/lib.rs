@@ -27,16 +27,17 @@
 #![warn(unreachable_pub)]
 #![warn(clippy::use_self)]
 
+use core::time::Duration;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 #[cfg(unix)]
 use std::os::unix::io::AsFd;
 #[cfg(windows)]
 use std::os::windows::io::AsSocket;
 #[cfg(not(wasm_browser))]
-use std::{
-    sync::Mutex,
-    time::{Duration, Instant},
-};
+use std::{sync::Mutex, time::Instant};
+
+#[cfg(apple_fast)]
+mod apple_fast;
 
 #[cfg(any(unix, windows))]
 mod cmsg;
@@ -44,6 +45,9 @@ mod cmsg;
 #[cfg(unix)]
 #[path = "unix.rs"]
 mod imp;
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+mod linux;
 
 #[cfg(windows)]
 #[path = "windows.rs"]
@@ -118,6 +122,10 @@ pub struct RecvMeta {
     pub dst_ip: Option<IpAddr>,
     /// The interface index of the interface on which the datagram was received
     pub interface_index: Option<u32>,
+    /// Kernel receive timestamp as Unix epoch
+    ///
+    /// Populated on platforms: Linux, Android.
+    pub timestamp: Option<Duration>,
 }
 
 impl Default for RecvMeta {
@@ -130,6 +138,7 @@ impl Default for RecvMeta {
             ecn: None,
             dst_ip: None,
             interface_index: None,
+            timestamp: None,
         }
     }
 }
@@ -217,7 +226,7 @@ pub enum TransportErrorPayload {
 
 /// Log at most 1 IO error per minute
 #[cfg(not(wasm_browser))]
-const IO_ERROR_LOG_INTERVAL: Duration = std::time::Duration::from_secs(60);
+const IO_ERROR_LOG_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Logs a warning message when sendmsg fails
 ///

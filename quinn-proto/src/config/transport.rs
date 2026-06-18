@@ -612,6 +612,8 @@ impl QlogConfig {
             self.start_time,
             trace,
             qlog::events::EventImportance::Core,
+            // `Instant` should have sub-microsecond precision on most platforms
+            qlog::streamer::EventTimePrecision::NanoSeconds,
             writer,
         );
 
@@ -779,7 +781,7 @@ impl From<VarInt> for IdleTimeout {
     }
 }
 
-impl std::convert::TryFrom<Duration> for IdleTimeout {
+impl TryFrom<Duration> for IdleTimeout {
     type Error = VarIntBoundsExceeded;
 
     fn try_from(timeout: Duration) -> Result<Self, Self::Error> {

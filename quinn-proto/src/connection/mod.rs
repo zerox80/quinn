@@ -389,7 +389,7 @@ impl Connection {
     /// - a call to `poll_transmit` returned `Some`
     /// - a call was made to `handle_timeout`
     #[must_use]
-    pub fn poll_timeout(&mut self) -> Option<Instant> {
+    pub fn poll_timeout(&self) -> Option<Instant> {
         self.timers.next_timeout()
     }
 
@@ -722,7 +722,7 @@ impl Connection {
                         // Clamp the datagram to at most the minimum MTU to ensure that loss probes
                         // can get through and enable recovery even if the path MTU has shrank
                         // unexpectedly.
-                        std::cmp::min(segment_size, usize::from(INITIAL_MTU))
+                        cmp::min(segment_size, usize::from(INITIAL_MTU))
                     }
                 };
                 buf_capacity += next_datagram_size_limit;
@@ -3506,7 +3506,7 @@ impl Connection {
                 id = %issued.id,
                 "NEW_CONNECTION_ID"
             );
-            frame::NewConnectionId {
+            NewConnectionId {
                 sequence: issued.sequence,
                 retire_prior_to: self.local_cid_state.retire_prior_to(),
                 id: issued.id,
@@ -3670,7 +3670,7 @@ impl Connection {
             negotiate_max_idle_timeout(self.config.max_idle_timeout, Some(params.max_idle_timeout));
         trace!("negotiated max idle timeout {:?}", self.idle_timeout);
         if let Some(ref info) = params.preferred_address {
-            self.rem_cids.insert(frame::NewConnectionId {
+            self.rem_cids.insert(NewConnectionId {
                 sequence: 1,
                 id: info.connection_id,
                 reset_token: info.stateless_reset_token,

@@ -4,6 +4,7 @@ use std::{
     io::IoSliceMut,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddrV4, UdpSocket},
     slice,
+    time::Duration,
 };
 
 use quinn_udp::{EcnCodepoint, RecvMeta, Transmit, UdpSocketState};
@@ -96,7 +97,7 @@ fn ecn_v4() {
 #[test]
 #[cfg(not(any(target_os = "openbsd", target_os = "netbsd", solarish)))]
 fn ecn_v6_dualstack() {
-    let recv = socket2::Socket::new(
+    let recv = Socket::new(
         socket2::Domain::IPV6,
         socket2::Type::DGRAM,
         Some(socket2::Protocol::UDP),
@@ -142,7 +143,7 @@ fn ecn_v6_dualstack() {
 #[test]
 #[cfg(not(any(target_os = "openbsd", target_os = "netbsd", solarish)))]
 fn ecn_v4_mapped_v6() {
-    let send = socket2::Socket::new(
+    let send = Socket::new(
         socket2::Domain::IPV6,
         socket2::Type::DGRAM,
         Some(socket2::Protocol::UDP),
@@ -218,13 +219,13 @@ fn socket_buffers() {
         1 // Everyone else is sane.
     };
 
-    let send = socket2::Socket::new(
+    let send = Socket::new(
         socket2::Domain::IPV4,
         socket2::Type::DGRAM,
         Some(socket2::Protocol::UDP),
     )
     .unwrap();
-    let recv = socket2::Socket::new(
+    let recv = Socket::new(
         socket2::Domain::IPV4,
         socket2::Type::DGRAM,
         Some(socket2::Protocol::UDP),
@@ -358,6 +359,26 @@ fn test_send_recv(send: &Socket, recv: &Socket, transmit: Transmit<'_>) {
             assert_eq!(meta.ecn, None);
         } else {
             assert_eq!(meta.ecn, transmit.ecn);
+        }
+
+        // On Linux and Android, we expect the kernel to provide a receive timestamp
+        // since we explicitly enabled `SO_TIMESTAMPNS`.
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        {
+            assert!(
+                meta.timestamp.is_some(),
+                "Kernel timestamp should be present on Linux/Android"
+            );
+            assert!(
+                meta.timestamp.unwrap() > Duration::ZERO,
+                "Kernel timestamp should be non-zero"
+            );
+        }
+
+        // On other platforms, the timestamp should remain `None`.
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        {
+            assert!(meta.timestamp.is_none());
         }
     }
     assert_eq!(datagrams, expected_datagrams);
@@ -498,7 +519,7 @@ fn recv_transport_error() {
                 break;
             }
             _ => {
-                std::thread::sleep(std::time::Duration::from_millis(10));
+                std::thread::sleep(Duration::from_millis(10));
             }
         }
     }
@@ -558,7 +579,7 @@ fn recv_transport_error_ipv6() {
             received = Some(err);
             break;
         }
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::thread::sleep(Duration::from_millis(10));
     }
 
     let err = received.expect("ICMPv6 Port Unreachable not received");

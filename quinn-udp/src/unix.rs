@@ -9,7 +9,7 @@ use std::{
         Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use socket2::SockRef;
@@ -19,30 +19,12 @@ use super::{
     log_sendmsg_error,
 };
 
-#[cfg(any(target_os = "linux", target_os = "android"))]
-use super::TransportErrorPayload;
-
-// Adapted from https://github.com/apple-oss-distributions/xnu/blob/8d741a5de7ff4191bf97d57b9f54c2f6d4a15585/bsd/sys/socket_private.h
 #[cfg(apple_fast)]
-#[repr(C)]
-#[allow(non_camel_case_types)]
-pub(crate) struct msghdr_x {
-    pub msg_name: *mut libc::c_void,
-    pub msg_namelen: libc::socklen_t,
-    pub msg_iov: *mut libc::iovec,
-    pub msg_iovlen: libc::c_int,
-    pub msg_control: *mut libc::c_void,
-    pub msg_controllen: libc::socklen_t,
-    pub msg_flags: libc::c_int,
-    pub msg_datalen: usize,
-}
+use super::apple_fast::{msghdr_x, recv_via_recvmsg_x, send};
+#[cfg(any(target_os = "linux", target_os = "android"))]
+use super::linux::{LinuxError, gso};
 
-#[cfg(target_os = "freebsd")]
-type IpTosTy = libc::c_uchar;
-#[cfg(not(any(target_os = "freebsd", target_os = "netbsd")))]
-type IpTosTy = libc::c_int;
-
-/// Tokio-compatible UDP socket with some useful specializations.
+/// Tokio-compatible UDP socket with some useful specializations
 ///
 /// Unlike a standard tokio UDP socket, this allows ECN bits to be read and written on some
 /// platforms.
@@ -80,16 +62,16 @@ impl UdpSocketState {
             || cfg!(solarish)
         {
             cmsg_platform_space +=
-                unsafe { libc::CMSG_SPACE(mem::size_of::<libc::in6_pktinfo>() as _) as usize };
+                unsafe { libc::CMSG_SPACE(size_of::<libc::in6_pktinfo>() as _) as usize };
         }
 
         assert!(
-            CMSG_LEN
-                >= unsafe { libc::CMSG_SPACE(mem::size_of::<libc::c_int>() as _) as usize }
+            cmsg::LEN
+                >= unsafe { libc::CMSG_SPACE(size_of::<libc::c_int>() as _) as usize }
                     + cmsg_platform_space
         );
         assert!(
-            mem::align_of::<libc::cmsghdr>() <= mem::align_of::<cmsg::Aligned<[u8; 0]>>(),
+            align_of::<libc::cmsghdr>() <= align_of::<cmsg::Aligned<[u8; 0]>>(),
             "control message buffers will be misaligned"
         );
 
@@ -153,6 +135,12 @@ impl UdpSocketState {
                 // list the kernel might potentially produce. See
                 // https://github.com/quinn-rs/quinn/pull/1354.
                 gro_segments = 64
+            }
+
+            if let Err(_err) =
+                set_socket_option(&*io, libc::SOL_SOCKET, libc::SO_TIMESTAMPNS, OPTION_ON)
+            {
+                crate::log::debug!("Ignoring error setting SO_TIMESTAMPNS on socket: {_err:?}");
             }
 
             if is_ipv4 || !io.only_v6()? {
@@ -221,7 +209,7 @@ impl UdpSocketState {
         })
     }
 
-    /// Sends a [`Transmit`] on the given socket.
+    /// Sends a [`Transmit`] on the given socket
     ///
     /// This function will only ever return errors of kind [`io::ErrorKind::WouldBlock`].
     /// All other errors will be logged and converted to `Ok`.
@@ -247,7 +235,7 @@ impl UdpSocketState {
         }
     }
 
-    /// Sends a [`Transmit`] on the given socket without any additional error handling.
+    /// Sends a [`Transmit`] on the given socket without any additional error handling
     pub fn try_send(&self, socket: UdpSockRef<'_>, transmit: &Transmit<'_>) -> io::Result<()> {
         send(self, socket.0, transmit)
     }
@@ -300,7 +288,7 @@ impl UdpSocketState {
         recv_single(socket.0, bufs, meta)
     }
 
-    /// Receives a pending, asynchronous transport-layer error from this socket.
+    /// Receives a pending, asynchronous transport-layer error from this socket
     ///
     /// On Linux and Android this pops one entry from the socket error queue
     /// (`MSG_ERRQUEUE`). Returns `None` if the queue is empty or if the
@@ -309,32 +297,32 @@ impl UdpSocketState {
     /// Returns an error if the underlying system call fails unexpectedly.
     pub fn recv_transport_error(
         &self,
-        socket: UdpSockRef<'_>,
+        _socket: UdpSockRef<'_>,
     ) -> io::Result<Option<TransportError>> {
         #[cfg(any(target_os = "linux", target_os = "android"))]
         {
-            Ok(LinuxError::recv(socket.0)?.map(TransportError::from))
+            Ok(LinuxError::recv(_socket.0)?.map(TransportError::from))
         }
 
         #[cfg(not(any(target_os = "linux", target_os = "android")))]
         {
-            let _ = socket;
             Ok(None)
         }
     }
 
-    /// The maximum amount of segments which can be transmitted if a platform
-    /// supports Generic Send Offload (GSO).
+    /// Maximum number of segments to transmit if Generic Send Offload (GSO) is enabled
     ///
-    /// This is 1 if the platform doesn't support GSO. Subject to change if errors are detected
-    /// while using GSO.
+    /// This is 1 if the platform doesn't support GSO.
+    ///
+    /// Subject to change if errors are detected while using GSO.
     #[inline]
     pub fn max_gso_segments(&self) -> usize {
         self.max_gso_segments.load(Ordering::Relaxed)
     }
 
-    /// The number of segments to read when GRO is enabled. Used as a factor to
-    /// compute the receive buffer size.
+    /// The number of segments to read when GRO is enabled
+    ///
+    /// Used as a factor to compute the receive buffer size.
     ///
     /// Returns 1 if the platform doesn't support GRO.
     #[inline]
@@ -375,7 +363,7 @@ impl UdpSocketState {
     }
 
     /// Returns true if we previously got an EINVAL error from `sendmsg` syscall.
-    fn sendmsg_einval(&self) -> bool {
+    pub(crate) fn sendmsg_einval(&self) -> bool {
         self.sendmsg_einval.load(Ordering::Relaxed)
     }
 
@@ -385,7 +373,8 @@ impl UdpSocketState {
         self.sendmsg_einval.store(true, Ordering::Relaxed)
     }
 
-    /// Enables Apple's fast UDP datapath using private `sendmsg_x`/`recvmsg_x` APIs.
+    /// Enables Apple's fast UDP datapath using private `sendmsg_x`/`recvmsg_x` APIs
+    ///
     /// Once enabled, this also updates [`max_gso_segments`] to allow batched sends.
     ///
     /// # Safety
@@ -400,177 +389,30 @@ impl UdpSocketState {
         self.max_gso_segments.store(BATCH_SIZE, Ordering::Relaxed);
     }
 
-    /// Returns whether Apple's fast UDP datapath is enabled for this socket.
+    /// Returns whether Apple's fast UDP datapath is enabled for this socket
     #[cfg(apple_fast)]
     pub fn is_apple_fast_path_enabled(&self) -> bool {
         self.apple_fast_path.load(Ordering::Relaxed)
     }
 
-    /// Disables Apple's fast UDP datapath, reverting to `sendmsg`/`recvmsg`.
+    /// Disables Apple's fast UDP datapath, reverting to `sendmsg`/`recvmsg`
     #[cfg(apple_fast)]
     fn disable_apple_fast_path(&self) {
         self.apple_fast_path.store(false, Ordering::Relaxed);
         self.max_gso_segments.store(1, Ordering::Relaxed);
     }
 
-    /// Resolves an Apple fast-path function pointer via `resolver`, disabling the fast path if
-    /// the symbol is absent so that future calls use the slow path directly.
+    /// Resolves an Apple fast-path function pointer via `resolver`
+    ///
+    /// Disables the fast path if the symbol is absent so that future calls use the slow path
+    /// directly.
     #[cfg(apple_fast)]
-    fn resolve_apple_fast_fn<T>(&self, resolver: fn() -> Option<T>) -> Option<T> {
+    pub(crate) fn resolve_apple_fast_fn<T>(&self, resolver: fn() -> Option<T>) -> Option<T> {
         let f = resolver();
         if f.is_none() {
             self.disable_apple_fast_path();
         }
         f
-    }
-}
-
-/// Decoded entry from the Linux socket error queue (`MSG_ERRQUEUE`).
-#[cfg(any(target_os = "linux", target_os = "android"))]
-struct LinuxError {
-    ee: libc::sock_extended_err,
-    offender: Option<SocketAddr>,
-}
-
-#[cfg(any(target_os = "linux", target_os = "android"))]
-impl LinuxError {
-    /// Control message buffer size for socket error queue (MSG_ERRQUEUE)
-    const ERR_CMSG_LEN: usize = 128;
-
-    /// Reads one entry from the Linux socket error queue (MSG_ERRQUEUE)
-    fn recv(io: SockRef<'_>) -> io::Result<Option<Self>> {
-        let mut name = MaybeUninit::<libc::sockaddr_storage>::uninit();
-        let mut ctrl = cmsg::Aligned(MaybeUninit::<[u8; Self::ERR_CMSG_LEN]>::uninit());
-
-        // Linux requires at least one iovec even for MSG_ERRQUEUE.
-        let mut iov_data = [0u8; 1];
-        let mut iov = libc::iovec {
-            iov_base: iov_data.as_mut_ptr() as *mut _,
-            iov_len: iov_data.len(),
-        };
-
-        let mut hdr = unsafe { mem::zeroed::<libc::msghdr>() };
-
-        hdr.msg_name = name.as_mut_ptr() as _;
-        hdr.msg_namelen = mem::size_of::<libc::sockaddr_storage>() as _;
-        hdr.msg_iov = &mut iov;
-        hdr.msg_iovlen = 1;
-        hdr.msg_control = ctrl.0.as_mut_ptr() as _;
-        hdr.msg_controllen = Self::ERR_CMSG_LEN as _;
-
-        if let Err(err) = retry_if_interrupted(|| unsafe {
-            libc::recvmsg(
-                io.as_raw_fd(),
-                &mut hdr,
-                libc::MSG_ERRQUEUE | libc::MSG_DONTWAIT,
-            )
-        }) {
-            if err.kind() == io::ErrorKind::WouldBlock {
-                return Ok(None);
-            }
-            return Err(err);
-        };
-
-        if hdr.msg_flags & libc::MSG_CTRUNC != 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "control message truncated",
-            ));
-        }
-
-        let cmsg_iter = unsafe { cmsg::Iter::new(&hdr) };
-
-        for cmsg in cmsg_iter {
-            if let Some(raw) = Self::decode(cmsg) {
-                return Ok(Some(raw));
-            }
-        }
-
-        Ok(None)
-    }
-
-    /// Attempts to decode a Linux `sock_extended_err` from a MSG_ERRQUEUE control message.
-    fn decode(cmsg: &libc::cmsghdr) -> Option<Self> {
-        if cmsg.cmsg_level != libc::IPPROTO_IP && cmsg.cmsg_level != libc::IPPROTO_IPV6 {
-            return None;
-        }
-
-        if cmsg.cmsg_type != libc::IP_RECVERR && cmsg.cmsg_type != libc::IPV6_RECVERR {
-            return None;
-        }
-
-        let required =
-            unsafe { libc::CMSG_LEN(mem::size_of::<libc::sock_extended_err>() as _) as usize };
-
-        if cmsg.cmsg_len < required {
-            return None;
-        }
-
-        let ee_ptr = unsafe { libc::CMSG_DATA(cmsg) as *const libc::sock_extended_err };
-        let (ee, offender_ptr, mut storage) = unsafe {
-            (
-                std::ptr::read_unaligned(ee_ptr),
-                libc::SO_EE_OFFENDER(ee_ptr),
-                std::mem::zeroed::<libc::sockaddr_storage>(),
-            )
-        };
-
-        let family = unsafe { (*offender_ptr).sa_family as i32 };
-        let len = match family {
-            libc::AF_INET => std::mem::size_of::<libc::sockaddr_in>(),
-            libc::AF_INET6 => std::mem::size_of::<libc::sockaddr_in6>(),
-            libc::AF_UNSPEC => {
-                return Some(Self { ee, offender: None });
-            }
-            _ => return None,
-        };
-
-        unsafe {
-            std::ptr::copy_nonoverlapping(
-                offender_ptr as *const u8,
-                &mut storage as *mut _ as *mut u8,
-                len,
-            );
-        }
-
-        let offender = Some(decode_socket_addr(&storage).ok()?);
-
-        Some(Self { ee, offender })
-    }
-}
-
-#[cfg(any(target_os = "linux", target_os = "android"))]
-impl From<LinuxError> for TransportError {
-    fn from(raw: LinuxError) -> Self {
-        crate::log::trace!(
-            "decoding Linux socket error: ee_origin={} ee_type={} ee_code={} ee_errno={} ee_info={}",
-            raw.ee.ee_origin,
-            raw.ee.ee_type,
-            raw.ee.ee_code,
-            raw.ee.ee_errno,
-            raw.ee.ee_info,
-        );
-        let payload = match (raw.ee.ee_origin, raw.ee.ee_type, raw.ee.ee_code) {
-            // IPv4: Fragmentation Needed (Type 3, Code 4)
-            (libc::SO_EE_ORIGIN_ICMP, 3, 4) => TransportErrorPayload::TooBig {
-                mtu: raw.ee.ee_info,
-            },
-            // IPv6: Packet Too Big (Type 2, Code 0)
-            (libc::SO_EE_ORIGIN_ICMP6, 2, 0) => TransportErrorPayload::TooBig {
-                mtu: raw.ee.ee_info,
-            },
-            // Unreachable cases
-            (libc::SO_EE_ORIGIN_ICMP, 3, _) | (libc::SO_EE_ORIGIN_ICMP6, 1, _) => {
-                TransportErrorPayload::Unreachable
-            }
-            _ => TransportErrorPayload::Other,
-        };
-
-        Self {
-            addr: raw.offender,
-            payload,
-            raw_errno: raw.ee.ee_errno as i32,
-        }
     }
 }
 
@@ -595,7 +437,7 @@ fn send(
     }
     let mut msg_hdr: libc::msghdr = unsafe { mem::zeroed() };
     let mut iovec: libc::iovec = unsafe { mem::zeroed() };
-    let mut cmsgs = cmsg::Aligned([0u8; CMSG_LEN]);
+    let mut cmsgs = cmsg::Aligned([0u8; cmsg::LEN]);
     let dst_addr = socket2::SockAddr::from(transmit.destination);
     prepare_msg(
         transmit,
@@ -631,9 +473,7 @@ fn send(
                         crate::log::info!(
                             "`libc::sendmsg` failed with {e}; halting segmentation offload"
                         );
-                        state
-                            .max_gso_segments
-                            .store(1, std::sync::atomic::Ordering::Relaxed);
+                        state.max_gso_segments.store(1, Ordering::Relaxed);
                     }
                 }
 
@@ -659,60 +499,6 @@ fn send(
     }
 }
 
-#[cfg(apple_fast)]
-fn send(state: &UdpSocketState, io: SockRef<'_>, transmit: &Transmit<'_>) -> io::Result<()> {
-    if state.is_apple_fast_path_enabled() {
-        send_via_sendmsg_x(state, io, transmit)
-    } else {
-        send_single(state, io, transmit)
-    }
-}
-
-/// Send using the fast `sendmsg_x` API.
-#[cfg(apple_fast)]
-fn send_via_sendmsg_x(
-    state: &UdpSocketState,
-    io: SockRef<'_>,
-    transmit: &Transmit<'_>,
-) -> io::Result<()> {
-    let mut hdrs = unsafe { mem::zeroed::<[msghdr_x; BATCH_SIZE]>() };
-    let mut iovs = unsafe { mem::zeroed::<[libc::iovec; BATCH_SIZE]>() };
-    let mut ctrls = [cmsg::Aligned([0u8; CMSG_LEN]); BATCH_SIZE];
-    let addr = socket2::SockAddr::from(transmit.destination);
-    let segment_size = transmit.segment_size.unwrap_or(transmit.contents.len());
-    let mut cnt = 0;
-    debug_assert!(transmit.contents.len().div_ceil(segment_size) <= BATCH_SIZE);
-    for (i, chunk) in transmit
-        .contents
-        .chunks(segment_size)
-        .enumerate()
-        .take(BATCH_SIZE)
-    {
-        prepare_msg_x(
-            &Transmit {
-                destination: transmit.destination,
-                ecn: transmit.ecn,
-                contents: chunk,
-                segment_size: Some(chunk.len()),
-                src_ip: transmit.src_ip,
-            },
-            &addr,
-            &mut hdrs[i],
-            &mut iovs[i],
-            &mut ctrls[i],
-            true,
-            state.sendmsg_einval(),
-        );
-        hdrs[i].msg_datalen = chunk.len();
-        cnt += 1;
-    }
-    let Some(sendmsg_x) = state.resolve_apple_fast_fn(sendmsg_x_fn) else {
-        return send_single(state, io, transmit);
-    };
-    retry_if_interrupted(|| unsafe { sendmsg_x(io.as_raw_fd(), hdrs.as_ptr(), cnt as u32, 0) })?;
-    Ok(())
-}
-
 #[cfg(any(target_os = "openbsd", target_os = "netbsd", apple_slow))]
 fn send(state: &UdpSocketState, io: SockRef<'_>, transmit: &Transmit<'_>) -> io::Result<()> {
     send_single(state, io, transmit)
@@ -720,10 +506,14 @@ fn send(state: &UdpSocketState, io: SockRef<'_>, transmit: &Transmit<'_>) -> io:
 
 #[cfg(any(target_os = "openbsd", target_os = "netbsd", apple))]
 #[cfg_attr(apple_fast, allow(dead_code))] // Unused when apple_fast is enabled
-fn send_single(state: &UdpSocketState, io: SockRef<'_>, transmit: &Transmit<'_>) -> io::Result<()> {
+pub(crate) fn send_single(
+    state: &UdpSocketState,
+    io: SockRef<'_>,
+    transmit: &Transmit<'_>,
+) -> io::Result<()> {
     let mut hdr: libc::msghdr = unsafe { mem::zeroed() };
     let mut iov: libc::iovec = unsafe { mem::zeroed() };
-    let mut ctrl = cmsg::Aligned([0u8; CMSG_LEN]);
+    let mut ctrl = cmsg::Aligned([0u8; cmsg::LEN]);
     let addr = socket2::SockAddr::from(transmit.destination);
     prepare_msg(
         transmit,
@@ -738,7 +528,7 @@ fn send_single(state: &UdpSocketState, io: SockRef<'_>, transmit: &Transmit<'_>)
     Ok(())
 }
 
-/// Receive using the batched `recvmmsg` syscall.
+/// Receive using the batched `recvmmsg` syscall
 #[cfg(not(any(
     apple,
     target_os = "openbsd",
@@ -753,7 +543,7 @@ fn recv_via_recvmmsg(
     meta: &mut [RecvMeta],
 ) -> io::Result<usize> {
     let mut names = [MaybeUninit::<libc::sockaddr_storage>::uninit(); BATCH_SIZE];
-    let mut ctrls = [cmsg::Aligned(MaybeUninit::<[u8; CMSG_LEN]>::uninit()); BATCH_SIZE];
+    let mut ctrls = [cmsg::Aligned(MaybeUninit::<[u8; cmsg::LEN]>::uninit()); BATCH_SIZE];
     let mut hdrs = unsafe { mem::zeroed::<[libc::mmsghdr; BATCH_SIZE]>() };
     let max_msg_count = bufs.len().min(BATCH_SIZE);
     for i in 0..max_msg_count {
@@ -779,80 +569,6 @@ fn recv_via_recvmmsg(
     Ok(msg_count as usize)
 }
 
-/// Receive using the fast `recvmsg_x` API.
-#[cfg(apple_fast)]
-fn recv_via_recvmsg_x(
-    state: &UdpSocketState,
-    io: SockRef<'_>,
-    bufs: &mut [IoSliceMut<'_>],
-    meta: &mut [RecvMeta],
-) -> io::Result<usize> {
-    let mut names = [MaybeUninit::<libc::sockaddr_storage>::uninit(); BATCH_SIZE];
-    // MacOS 10.15 `recvmsg_x` does not override the `msghdr_x`
-    // `msg_controllen`. Thus, after the call to `recvmsg_x`, one does not know
-    // which control messages have been written to. To prevent reading
-    // uninitialized memory, do not use `MaybeUninit` for `ctrls`, instead
-    // initialize `ctrls` with `0`s. A control message of all `0`s is
-    // automatically skipped by `libc::CMSG_NXTHDR`.
-    let mut ctrls = [cmsg::Aligned([0u8; CMSG_LEN]); BATCH_SIZE];
-    let mut hdrs = unsafe { mem::zeroed::<[msghdr_x; BATCH_SIZE]>() };
-    let max_msg_count = bufs.len().min(BATCH_SIZE);
-    for i in 0..max_msg_count {
-        prepare_recv_x(&mut bufs[i], &mut names[i], &mut ctrls[i], &mut hdrs[i]);
-    }
-    let Some(recvmsg_x) = state.resolve_apple_fast_fn(recvmsg_x_fn) else {
-        return recv_single(io, bufs, meta);
-    };
-    let msg_count = retry_if_interrupted(|| unsafe {
-        recvmsg_x(io.as_raw_fd(), hdrs.as_mut_ptr(), max_msg_count as _, 0)
-    })?;
-    for i in 0..(msg_count as usize) {
-        meta[i] = decode_recv(&names[i], &hdrs[i], hdrs[i].msg_datalen as usize)?;
-    }
-    Ok(msg_count as usize)
-}
-
-/// Returns the `sendmsg_x` function pointer, resolving it via `dlsym` on first call.
-///
-/// Returns `None` if the symbol is not available on the current OS version.
-#[cfg(apple_fast)]
-fn sendmsg_x_fn() -> Option<SendmsgXFn> {
-    static ADDR: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    // SAFETY: `resolve_symbol` only returns non-zero addresses obtained from `dlsym`, which
-    // guarantees a callable symbol whose type matches the declaration above.
-    resolve_symbol(&ADDR, c"sendmsg_x")
-        .map(|addr| unsafe { std::mem::transmute::<usize, SendmsgXFn>(addr) })
-}
-
-/// Returns the `recvmsg_x` function pointer, resolving it via `dlsym` on first call.
-///
-/// Returns `None` if the symbol is not available on the current OS version.
-#[cfg(apple_fast)]
-fn recvmsg_x_fn() -> Option<RecvmsgXFn> {
-    static ADDR: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    // SAFETY: `resolve_symbol` only returns non-zero addresses obtained from `dlsym`, which
-    // guarantees a callable symbol whose type matches the declaration above.
-    resolve_symbol(&ADDR, c"recvmsg_x")
-        .map(|addr| unsafe { std::mem::transmute::<usize, RecvmsgXFn>(addr) })
-}
-
-#[cfg(apple_fast)]
-type SendmsgXFn =
-    unsafe extern "C" fn(libc::c_int, *const msghdr_x, libc::c_uint, libc::c_int) -> isize;
-#[cfg(apple_fast)]
-type RecvmsgXFn =
-    unsafe extern "C" fn(libc::c_int, *mut msghdr_x, libc::c_uint, libc::c_int) -> isize;
-
-/// Resolves a symbol via `dlsym` on first call, caching the result.
-///
-/// Returns `None` if the symbol is not available on the current OS version.
-#[cfg(apple_fast)]
-fn resolve_symbol(lock: &std::sync::OnceLock<usize>, name: &std::ffi::CStr) -> Option<usize> {
-    let addr =
-        *lock.get_or_init(|| unsafe { libc::dlsym(libc::RTLD_DEFAULT, name.as_ptr()) as usize });
-    (addr != 0).then_some(addr)
-}
-
 #[cfg(any(
     target_os = "openbsd",
     target_os = "netbsd",
@@ -862,13 +578,13 @@ fn resolve_symbol(lock: &std::sync::OnceLock<usize>, name: &std::ffi::CStr) -> O
     apple
 ))]
 #[cfg_attr(apple_fast, allow(dead_code))] // Unused when apple_fast is enabled
-fn recv_single(
+pub(crate) fn recv_single(
     io: SockRef<'_>,
     bufs: &mut [IoSliceMut<'_>],
     meta: &mut [RecvMeta],
 ) -> io::Result<usize> {
     let mut name = MaybeUninit::<libc::sockaddr_storage>::uninit();
-    let mut ctrl = cmsg::Aligned(MaybeUninit::<[u8; CMSG_LEN]>::uninit());
+    let mut ctrl = cmsg::Aligned(MaybeUninit::<[u8; cmsg::LEN]>::uninit());
     let mut hdr = unsafe { mem::zeroed::<libc::msghdr>() };
     prepare_recv(&mut bufs[0], &mut name, &mut ctrl, &mut hdr);
     let n = loop {
@@ -893,15 +609,13 @@ fn recv_single(
     Ok(1)
 }
 
-const CMSG_LEN: usize = 88;
-
 #[cfg_attr(apple_fast, allow(dead_code))] // Unused when apple_fast is enabled
 fn prepare_msg(
     transmit: &Transmit<'_>,
     dst_addr: &socket2::SockAddr,
     hdr: &mut libc::msghdr,
     iov: &mut libc::iovec,
-    ctrl: &mut cmsg::Aligned<[u8; CMSG_LEN]>,
+    ctrl: &mut cmsg::Aligned<[u8; cmsg::LEN]>,
     #[allow(unused_variables)] // only used on FreeBSD & macOS
     encode_src_ip: bool,
     sendmsg_einval: bool,
@@ -922,7 +636,7 @@ fn prepare_msg(
     hdr.msg_iovlen = 1;
 
     hdr.msg_control = ctrl.0.as_mut_ptr() as _;
-    hdr.msg_controllen = CMSG_LEN as _;
+    hdr.msg_controllen = cmsg::LEN as _;
     let mut encoder = unsafe { cmsg::Encoder::new(hdr) };
     let ecn = transmit.ecn.map_or(0, |x| x as libc::c_int);
     // True for IPv4 or IPv4-Mapped IPv6
@@ -990,101 +704,23 @@ fn prepare_msg(
     encoder.finish();
 }
 
-/// Prepares an `msghdr_x` for use with `sendmsg_x`.
-#[cfg(apple_fast)]
-fn prepare_msg_x(
-    transmit: &Transmit<'_>,
-    dst_addr: &socket2::SockAddr,
-    hdr: &mut msghdr_x,
-    iov: &mut libc::iovec,
-    ctrl: &mut cmsg::Aligned<[u8; CMSG_LEN]>,
-    #[allow(unused_variables)] encode_src_ip: bool,
-    sendmsg_einval: bool,
-) {
-    iov.iov_base = transmit.contents.as_ptr() as *const _ as *mut _;
-    iov.iov_len = transmit.contents.len();
-
-    let name = dst_addr.as_ptr() as *mut libc::c_void;
-    let namelen = dst_addr.len();
-    hdr.msg_name = name as *mut _;
-    hdr.msg_namelen = namelen;
-    hdr.msg_iov = iov;
-    hdr.msg_iovlen = 1;
-
-    hdr.msg_control = ctrl.0.as_mut_ptr() as _;
-    hdr.msg_controllen = CMSG_LEN as _;
-    let mut encoder = unsafe { cmsg::Encoder::new(hdr) };
-    let ecn = transmit.ecn.map_or(0, |x| x as libc::c_int);
-    let is_ipv4 = transmit.destination.is_ipv4()
-        || matches!(transmit.destination.ip(), IpAddr::V6(addr) if addr.to_ipv4_mapped().is_some());
-    if is_ipv4 {
-        if !sendmsg_einval {
-            encoder.push(libc::IPPROTO_IP, libc::IP_TOS, ecn as IpTosTy);
-        }
-    } else {
-        encoder.push(libc::IPPROTO_IPV6, libc::IPV6_TCLASS, ecn);
-    }
-
-    if let Some(ip) = &transmit.src_ip {
-        match ip {
-            IpAddr::V4(v4) => {
-                if encode_src_ip {
-                    let addr = libc::in_addr {
-                        s_addr: u32::from_ne_bytes(v4.octets()),
-                    };
-                    encoder.push(libc::IPPROTO_IP, libc::IP_RECVDSTADDR, addr);
-                }
-            }
-            IpAddr::V6(v6) => {
-                let pktinfo = libc::in6_pktinfo {
-                    ipi6_ifindex: 0,
-                    ipi6_addr: libc::in6_addr {
-                        s6_addr: v6.octets(),
-                    },
-                };
-                encoder.push(libc::IPPROTO_IPV6, libc::IPV6_PKTINFO, pktinfo);
-            }
-        }
-    }
-
-    encoder.finish();
-}
-
 #[cfg_attr(apple_fast, allow(dead_code))] // Unused when apple_fast is enabled
 fn prepare_recv(
     buf: &mut IoSliceMut<'_>,
     name: &mut MaybeUninit<libc::sockaddr_storage>,
-    ctrl: &mut cmsg::Aligned<MaybeUninit<[u8; CMSG_LEN]>>,
+    ctrl: &mut cmsg::Aligned<MaybeUninit<[u8; cmsg::LEN]>>,
     hdr: &mut libc::msghdr,
 ) {
     hdr.msg_name = name.as_mut_ptr() as _;
-    hdr.msg_namelen = mem::size_of::<libc::sockaddr_storage>() as _;
+    hdr.msg_namelen = size_of::<libc::sockaddr_storage>() as _;
     hdr.msg_iov = buf as *mut IoSliceMut<'_> as *mut libc::iovec;
     hdr.msg_iovlen = 1;
     hdr.msg_control = ctrl.0.as_mut_ptr() as _;
-    hdr.msg_controllen = CMSG_LEN as _;
+    hdr.msg_controllen = cmsg::LEN as _;
     hdr.msg_flags = 0;
 }
 
-/// Prepares an `msghdr_x` for receiving with `recvmsg_x`.
-#[cfg(apple_fast)]
-fn prepare_recv_x(
-    buf: &mut IoSliceMut<'_>,
-    name: &mut MaybeUninit<libc::sockaddr_storage>,
-    ctrl: &mut cmsg::Aligned<[u8; CMSG_LEN]>,
-    hdr: &mut msghdr_x,
-) {
-    hdr.msg_name = name.as_mut_ptr() as _;
-    hdr.msg_namelen = mem::size_of::<libc::sockaddr_storage>() as _;
-    hdr.msg_iov = buf as *mut IoSliceMut<'_> as *mut libc::iovec;
-    hdr.msg_iovlen = 1;
-    hdr.msg_control = ctrl.0.as_mut_ptr() as _;
-    hdr.msg_controllen = CMSG_LEN as _;
-    hdr.msg_flags = 0;
-    hdr.msg_datalen = buf.len();
-}
-
-fn decode_recv<M: cmsg::MsgHdr<ControlMessage = libc::cmsghdr>>(
+pub(crate) fn decode_recv<M: cmsg::MsgHdr<ControlMessage = libc::cmsghdr>>(
     name: &MaybeUninit<libc::sockaddr_storage>,
     hdr: &M,
     len: usize,
@@ -1095,6 +731,7 @@ fn decode_recv<M: cmsg::MsgHdr<ControlMessage = libc::cmsghdr>>(
         dst_ip: None,
         interface_index: None,
         stride: len,
+        timestamp: None,
     };
 
     let cmsg_iter = unsafe { cmsg::Iter::new(hdr) };
@@ -1109,6 +746,7 @@ fn decode_recv<M: cmsg::MsgHdr<ControlMessage = libc::cmsghdr>>(
         ecn: EcnCodepoint::from_bits(ctrl.ecn_bits),
         dst_ip: ctrl.dst_ip,
         interface_index: ctrl.interface_index,
+        timestamp: ctrl.timestamp,
     })
 }
 
@@ -1118,6 +756,7 @@ struct ControlMetadata {
     dst_ip: Option<IpAddr>,
     interface_index: Option<u32>,
     stride: usize,
+    timestamp: Option<Duration>,
 }
 
 impl ControlMetadata {
@@ -1143,7 +782,7 @@ impl ControlMetadata {
                 // https://bugreport.apple.com/web/?problemID=48761855
                 #[allow(clippy::unnecessary_cast)] // cmsg.cmsg_len defined as size_t
                 if cfg!(apple)
-                    && cmsg.cmsg_len as usize == libc::CMSG_LEN(mem::size_of::<u8>() as _) as usize
+                    && cmsg.cmsg_len as usize == libc::CMSG_LEN(size_of::<u8>() as _) as usize
                 {
                     self.ecn_bits = cmsg::decode::<u8, libc::cmsghdr>(cmsg);
                 } else {
@@ -1176,13 +815,20 @@ impl ControlMetadata {
             (libc::SOL_UDP, libc::UDP_GRO) => unsafe {
                 self.stride = cmsg::decode::<libc::c_int, libc::cmsghdr>(cmsg) as usize;
             },
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            (libc::SOL_SOCKET, libc::SCM_TIMESTAMPNS) => {
+                let ts = unsafe { cmsg::decode::<libc::timespec, libc::cmsghdr>(cmsg) };
+                let secs = u64::try_from(ts.tv_sec).unwrap_or(0);
+                let nsecs = u32::try_from(ts.tv_nsec).unwrap_or(0);
+                self.timestamp = Some(Duration::new(secs, nsecs));
+            }
             _ => {}
         }
     }
 }
 
 /// Decodes a `sockaddr_storage` into a `SocketAddr`
-fn decode_socket_addr(name: &libc::sockaddr_storage) -> io::Result<SocketAddr> {
+pub(crate) fn decode_socket_addr(name: &libc::sockaddr_storage) -> io::Result<SocketAddr> {
     match libc::c_int::from(name.ss_family) {
         libc::AF_INET => {
             // Safety: if the ss_family field is AF_INET then storage must be a sockaddr_in.
@@ -1217,167 +863,6 @@ pub(crate) const BATCH_SIZE: usize = 32;
 #[cfg(apple_slow)]
 pub(crate) const BATCH_SIZE: usize = 1;
 
-#[cfg(any(target_os = "linux", target_os = "android"))]
-mod gso {
-    use super::*;
-    use std::{ffi::CStr, mem, str::FromStr, sync::OnceLock};
-
-    // Support for UDP GSO has been added to linux kernel in version 4.18
-    // https://github.com/torvalds/linux/commit/cb586c63e3fc5b227c51fd8c4cb40b34d3750645
-    const SUPPORTED_SINCE: KernelVersion = KernelVersion {
-        version: 4,
-        major_revision: 18,
-    };
-
-    /// Checks whether GSO support is available by checking the kernel version followed by setting
-    /// the UDP_SEGMENT option on a socket
-    pub(crate) fn max_gso_segments(socket: &impl AsRawFd) -> usize {
-        const GSO_SIZE: libc::c_int = 1500;
-
-        if !SUPPORTED_BY_CURRENT_KERNEL.get_or_init(supported_by_current_kernel) {
-            return 1;
-        }
-
-        // As defined in linux/udp.h
-        // #define UDP_MAX_SEGMENTS        (1 << 6UL)
-        match set_socket_option(socket, libc::SOL_UDP, libc::UDP_SEGMENT, GSO_SIZE) {
-            Ok(()) => {
-                // Disable GSO again globally to ensure we can selectively enable it via cmsg.
-                // See:
-                // - https://github.com/quinn-rs/quinn/issues/2575
-                // - https://man7.org/linux/man-pages/man7/udp.7.html
-                let _ = set_socket_option(socket, libc::SOL_UDP, libc::UDP_SEGMENT, 0);
-
-                64
-            }
-            Err(_e) => {
-                crate::log::debug!(
-                    "failed to set `UDP_SEGMENT` socket option ({_e}); setting `max_gso_segments = 1`"
-                );
-
-                1
-            }
-        }
-    }
-
-    pub(crate) fn set_segment_size(
-        encoder: &mut cmsg::Encoder<'_, libc::msghdr>,
-        segment_size: u16,
-    ) {
-        encoder.push(libc::SOL_UDP, libc::UDP_SEGMENT, segment_size);
-    }
-
-    // Avoid calling `supported_by_current_kernel` for each socket by using `OnceLock`.
-    static SUPPORTED_BY_CURRENT_KERNEL: OnceLock<bool> = OnceLock::new();
-
-    fn supported_by_current_kernel() -> bool {
-        let kernel_version_string = match kernel_version_string() {
-            Ok(kernel_version_string) => kernel_version_string,
-            Err(_e) => {
-                crate::log::warn!("GSO disabled: uname returned {_e}");
-                return false;
-            }
-        };
-
-        let Some(kernel_version) = KernelVersion::from_str(&kernel_version_string) else {
-            crate::log::warn!(
-                "GSO disabled: failed to parse kernel version ({kernel_version_string})"
-            );
-            return false;
-        };
-
-        if kernel_version < SUPPORTED_SINCE {
-            crate::log::info!("GSO disabled: kernel too old ({kernel_version_string}); need 4.18+",);
-            return false;
-        }
-
-        true
-    }
-
-    fn kernel_version_string() -> io::Result<String> {
-        let mut n = unsafe { mem::zeroed() };
-        let r = unsafe { libc::uname(&mut n) };
-        if r != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(unsafe {
-            CStr::from_ptr(n.release[..].as_ptr())
-                .to_string_lossy()
-                .into_owned()
-        })
-    }
-
-    // https://www.linfo.org/kernel_version_numbering.html
-    #[derive(Eq, PartialEq, Ord, PartialOrd, Debug)]
-    struct KernelVersion {
-        version: u8,
-        major_revision: u8,
-    }
-
-    impl KernelVersion {
-        fn from_str(release: &str) -> Option<Self> {
-            let mut split = release
-                .split_once('-')
-                .map(|pair| pair.0)
-                .unwrap_or(release)
-                .split('.');
-
-            let version = u8::from_str(split.next()?).ok()?;
-            let major_revision = u8::from_str(split.next()?).ok()?;
-
-            Some(Self {
-                version,
-                major_revision,
-            })
-        }
-    }
-
-    #[cfg(test)]
-    mod test {
-        use super::*;
-
-        #[test]
-        fn parse_current_kernel_version_release_string() {
-            let release = kernel_version_string().unwrap();
-            KernelVersion::from_str(&release).unwrap();
-        }
-
-        #[test]
-        fn parse_kernel_version_release_string() {
-            // These are made up for the test
-            assert_eq!(
-                KernelVersion::from_str("4.14"),
-                Some(KernelVersion {
-                    version: 4,
-                    major_revision: 14
-                })
-            );
-            assert_eq!(
-                KernelVersion::from_str("4.18"),
-                Some(KernelVersion {
-                    version: 4,
-                    major_revision: 18
-                })
-            );
-            // These were seen in the wild
-            assert_eq!(
-                KernelVersion::from_str("4.14.186-27095505"),
-                Some(KernelVersion {
-                    version: 4,
-                    major_revision: 14
-                })
-            );
-            assert_eq!(
-                KernelVersion::from_str("6.8.0-59-generic"),
-                Some(KernelVersion {
-                    version: 6,
-                    major_revision: 8
-                })
-            );
-        }
-    }
-}
-
 // On Apple platforms using the `sendmsg_x` call, UDP datagram segmentation is not
 // offloaded to the NIC or even the kernel, but instead done here in user space in
 // [`send`]) and then passed to the OS as individual `iovec`s (up to `BATCH_SIZE`).
@@ -1400,6 +885,11 @@ mod gso {
     }
 }
 
+#[cfg(target_os = "freebsd")]
+type IpTosTy = libc::c_uchar;
+#[cfg(not(any(target_os = "freebsd", target_os = "netbsd")))]
+pub(crate) type IpTosTy = libc::c_int;
+
 /// Returns whether the given socket option is supported on the current platform
 ///
 /// Yields `Ok(true)` if the option was set successfully, `Ok(false)` if setting
@@ -1418,7 +908,7 @@ fn set_socket_option_supported(
     }
 }
 
-fn set_socket_option(
+pub(crate) fn set_socket_option(
     socket: &impl AsRawFd,
     level: libc::c_int,
     name: libc::c_int,
@@ -1430,7 +920,7 @@ fn set_socket_option(
             level,
             name,
             &value as *const _ as _,
-            mem::size_of_val(&value) as _,
+            size_of_val(&value) as _,
         )
     };
 
@@ -1442,9 +932,10 @@ fn set_socket_option(
 
 const OPTION_ON: libc::c_int = 1;
 
-/// Calls `f` in a loop, retrying on `EINTR`, and returns the non-negative result or the first
-/// non-`EINTR` error.
-fn retry_if_interrupted(mut f: impl FnMut() -> isize) -> io::Result<isize> {
+/// Calls `f` in a loop, retrying on `EINTR`
+///
+/// Returns the non-negative result or the first non-`EINTR` error.
+pub(crate) fn retry_if_interrupted(mut f: impl FnMut() -> isize) -> io::Result<isize> {
     loop {
         let n = f();
         if n >= 0 {
@@ -1454,71 +945,5 @@ fn retry_if_interrupted(mut f: impl FnMut() -> isize) -> io::Result<isize> {
         if e.kind() != io::ErrorKind::Interrupted {
             return Err(e);
         }
-    }
-}
-
-#[cfg(all(test, any(target_os = "linux", target_os = "android")))]
-mod tests {
-    use super::*;
-
-    // Tests LinuxError::decode with a mocked MSG_ERRQUEUE control message.
-    //
-    // Validates CMSG parsing, SO_EE_OFFENDER handling, and sockaddr decoding.
-    #[test]
-    fn decode_mock_ip_recverr() {
-        let mock_ee = libc::sock_extended_err {
-            ee_errno: libc::EMSGSIZE as u32,
-            ee_origin: libc::SO_EE_ORIGIN_ICMP,
-            ee_type: 3,
-            ee_code: 4,
-            ee_pad: 0,
-            ee_info: 1420,
-            ee_data: 0,
-        };
-
-        let mock_addr = libc::sockaddr_in {
-            sin_family: libc::AF_INET as libc::sa_family_t,
-            sin_port: 443u16.to_be(),
-            sin_addr: libc::in_addr {
-                s_addr: u32::from_ne_bytes([127, 0, 0, 1]),
-            },
-            sin_zero: [0; 8],
-        };
-
-        let payload_len =
-            mem::size_of::<libc::sock_extended_err>() + mem::size_of::<libc::sockaddr_in>();
-        let cmsg_len = unsafe { libc::CMSG_LEN(payload_len as _) as usize };
-        let mut buffer = vec![0u8; cmsg_len];
-
-        let decoded = unsafe {
-            let cmsg = buffer.as_mut_ptr() as *mut libc::cmsghdr;
-
-            (*cmsg).cmsg_len = cmsg_len as _;
-            (*cmsg).cmsg_level = libc::IPPROTO_IP;
-            (*cmsg).cmsg_type = libc::IP_RECVERR;
-
-            let data = libc::CMSG_DATA(cmsg);
-            ptr::write(data as *mut libc::sock_extended_err, mock_ee);
-
-            let offender_ptr = data.add(mem::size_of::<libc::sock_extended_err>());
-            ptr::write(offender_ptr as *mut libc::sockaddr_in, mock_addr);
-
-            LinuxError::decode(&*cmsg)
-        }
-        .expect("decode failed");
-
-        assert_eq!(decoded.ee.ee_errno, libc::EMSGSIZE as u32);
-        assert_eq!(decoded.ee.ee_info, 1420);
-
-        let offender = decoded.offender.unwrap();
-
-        assert_eq!(offender.port(), 443);
-        assert_eq!(offender.ip(), Ipv4Addr::new(127, 0, 0, 1));
-
-        let transport = TransportError::from(decoded);
-        assert!(matches!(
-            transport.payload,
-            TransportErrorPayload::TooBig { mtu: 1420 }
-        ));
     }
 }
