@@ -361,15 +361,27 @@ fn decode_unix_secs<B: Buf>(buf: &mut B) -> Option<SystemTime> {
 /// Stateless reset token
 ///
 /// Used for an endpoint to securely communicate that it has lost state for a connection.
+const RESET_TOKEN_CONTEXT_PREFIX: &[u8] = b"quinn stateless reset token v1";
+
 #[allow(clippy::derived_hash_with_manual_eq)] // Custom PartialEq impl matches derived semantics
 #[derive(Debug, Copy, Clone, Hash)]
 pub(crate) struct ResetToken([u8; RESET_TOKEN_SIZE]);
 
 impl ResetToken {
-    pub(crate) fn new(key: &dyn HmacKey, id: ConnectionId) -> Self {
+    pub(crate) fn new(key: &dyn HmacKey, context: &[u8], id: ConnectionId) -> Self {
         let mut signature = vec![0; key.signature_len()];
-        key.sign(&id, &mut signature);
-        // TODO: Server ID??
+        if context.is_empty() {
+            key.sign(&id, &mut signature);
+        } else {
+            let mut input = Vec::with_capacity(
+                RESET_TOKEN_CONTEXT_PREFIX.len() + size_of::<u64>() + context.len() + id.len(),
+            );
+            input.extend_from_slice(RESET_TOKEN_CONTEXT_PREFIX);
+            input.extend_from_slice(&(context.len() as u64).to_be_bytes());
+            input.extend_from_slice(context);
+            input.extend_from_slice(&id);
+            key.sign(&input, &mut signature);
+        }
         let mut result = [0; RESET_TOKEN_SIZE];
         result.copy_from_slice(&signature[..RESET_TOKEN_SIZE]);
         result.into()
@@ -410,9 +422,9 @@ impl fmt::Display for ResetToken {
 mod test {
     use super::*;
     #[cfg(all(feature = "aws-lc-rs", not(feature = "ring")))]
-    use aws_lc_rs::hkdf;
+    use aws_lc_rs::{hkdf, hmac};
     #[cfg(feature = "ring")]
-    use ring::hkdf;
+    use ring::{hkdf, hmac};
 
     fn token_round_trip(payload: TokenPayload) -> TokenPayload {
         let rng = &mut rand::rng();
@@ -498,5 +510,22 @@ mod test {
 
         // Assert: garbage sealed data returns err
         assert!(Token::decode(&prk, &invalid_token).is_none());
+    }
+
+    #[test]
+    fn reset_token_context_domain_separates() {
+        let key_material = [7; 64];
+        let key = hmac::Key::new(hmac::HMAC_SHA256, &key_material);
+        let id = ConnectionId::new(b"conn-id");
+
+        let default = ResetToken::new(&key, &[], id);
+        let mut signature = vec![0; key.signature_len()];
+        key.sign(&id, &mut signature);
+        assert_eq!(&default[..], &signature[..RESET_TOKEN_SIZE]);
+
+        let server_a = ResetToken::new(&key, b"server-a", id);
+        assert_eq!(server_a, ResetToken::new(&key, b"server-a", id));
+        assert_ne!(default, server_a);
+        assert_ne!(server_a, ResetToken::new(&key, b"server-b", id));
     }
 }
