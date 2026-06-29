@@ -3457,10 +3457,13 @@ impl Connection {
             // Since the offset is known, we can reserve the exact size required to encode it.
             // For length we reserve 2bytes which allows to encode up to 2^14,
             // which is more than what fits into normally sized QUIC frames.
+            // SAFETY: CRYPTO stream offsets are encoded as QUIC variable-length integers and so are
+            // always less than 2^62.
+            let offset = unsafe { VarInt::from_u64_unchecked(frame.offset) };
             let max_crypto_data_size = max_size
                 - buf.len()
                 - 1 // Frame Type
-                - VarInt::size(unsafe { VarInt::from_u64_unchecked(frame.offset) })
+                - VarInt::size(offset)
                 - 2; // Maximum encoded length for frame size, given we send less than 2^14 bytes
 
             let len = frame
