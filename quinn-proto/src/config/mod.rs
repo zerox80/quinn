@@ -36,6 +36,7 @@ pub use transport::{AckFrequencyConfig, IdleTimeout, MtuDiscoveryConfig, Transpo
 #[derive(Clone)]
 pub struct EndpointConfig {
     pub(crate) reset_key: Arc<dyn HmacKey>,
+    pub(crate) reset_token_context: Arc<[u8]>,
     pub(crate) max_udp_payload_size: VarInt,
     /// CID generator factory
     ///
@@ -57,6 +58,7 @@ impl EndpointConfig {
             || -> Box<dyn ConnectionIdGenerator> { Box::<HashedConnectionIdGenerator>::default() };
         Self {
             reset_key,
+            reset_token_context: Arc::from(&[][..]),
             max_udp_payload_size: (1500u32 - 28).into(), // Ethernet MTU minus IP + UDP headers
             connection_id_generator_factory: Arc::new(cid_factory),
             supported_versions: DEFAULT_SUPPORTED_VERSIONS.to_vec(),
@@ -86,6 +88,19 @@ impl EndpointConfig {
     /// communicating with a previous instance of this endpoint.
     pub fn reset_key(&mut self, key: Arc<dyn HmacKey>) -> &mut Self {
         self.reset_key = key;
+        self
+    }
+
+    /// Context used for stateless reset token derivation.
+    ///
+    /// The context is not secret. It provides domain separation for deployments that share a
+    /// reset key across multiple logical servers or routing domains. The default empty context
+    /// preserves the historical token derivation for compatibility.
+    ///
+    /// Deployments should use either a unique [`reset_key`](Self::reset_key) or a unique reset
+    /// token context for each logical server identity.
+    pub fn reset_token_context(&mut self, context: impl AsRef<[u8]>) -> &mut Self {
+        self.reset_token_context = Arc::from(context.as_ref());
         self
     }
 
@@ -165,6 +180,7 @@ impl fmt::Debug for EndpointConfig {
     fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt.debug_struct("EndpointConfig")
             // reset_key not debug
+            .field("reset_token_context_len", &self.reset_token_context.len())
             .field("max_udp_payload_size", &self.max_udp_payload_size)
             // cid_generator_factory not debug
             .field("supported_versions", &self.supported_versions)

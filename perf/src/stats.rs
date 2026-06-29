@@ -79,7 +79,7 @@ impl Stats {
 
     pub fn print(&self) {
         let dt = self.start_instant.elapsed();
-        let rps = self.requests as f64 / dt.as_secs_f64();
+        let rps = per_second(self.requests as f64, dt.as_secs_f64());
 
         println!("Overall stats:");
         println!(
@@ -239,7 +239,30 @@ struct StreamIntervalStats {
 }
 
 fn throughput_bytes_per_second(duration_in_micros: u64, size: u64) -> f64 {
-    (size as f64) / (duration_in_micros as f64 / 1000000.0)
+    per_second(size as f64, duration_in_micros as f64 / 1_000_000.0)
+}
+
+fn bits_per_second(bytes: usize, seconds: f64) -> f64 {
+    per_second(bytes as f64 * 8.0, seconds)
+}
+
+fn per_second(value: f64, seconds: f64) -> f64 {
+    if seconds == 0.0 { 0.0 } else { value / seconds }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn throughput_is_zero_for_zero_duration() {
+        assert_eq!(throughput_bytes_per_second(0, 1024), 0.0);
+    }
+
+    #[test]
+    fn bits_per_second_is_zero_for_zero_period() {
+        assert_eq!(bits_per_second(1024, 0.0), 0.0);
+    }
 }
 
 #[cfg(feature = "json-output")]
@@ -358,7 +381,7 @@ mod json {
             stats: &StreamIntervalStats,
             period: &stats::IntervalPeriod,
         ) -> Self {
-            let bits_per_second = stats.bytes as f64 * 8.0 / period.seconds;
+            let bits_per_second = stats::bits_per_second(stats.bytes, period.seconds);
 
             Self {
                 id: stats.id,
@@ -397,7 +420,7 @@ mod json {
                 .filter(|stat| stat.sender == sender)
                 .map(|stat| stat.bytes)
                 .sum();
-            let bits_per_second = bytes as f64 * 8.0 / period.seconds;
+            let bits_per_second = stats::bits_per_second(bytes, period.seconds);
 
             Self {
                 start: period.start,

@@ -307,101 +307,98 @@ impl From<UnexpectedEnd> for Error {
 impl TransportParameters {
     /// Encode `TransportParameters` into buffer
     pub fn write<W: BufMut>(&self, w: &mut W) {
+        let default_order;
         let ids = match &self.write_order {
             Some(order) => order,
-            None => &std::array::from_fn(|i| i as u8),
+            None => {
+                default_order = std::array::from_fn(|i| i as u8);
+                &default_order
+            }
         };
 
-        for idx in ids {
-            let id = TransportParameterId::SUPPORTED[*idx as usize];
-            match id {
-                TransportParameterId::ReservedTransportParameter => {
-                    if let Some(param) = self.grease_transport_parameter {
-                        param.write(w);
-                    }
-                }
-                TransportParameterId::StatelessResetToken => {
-                    if let Some(ref x) = self.stateless_reset_token {
-                        w.write_var(id as u64);
-                        w.write_var(16);
-                        w.put_slice(x);
-                    }
-                }
-                TransportParameterId::DisableActiveMigration => {
-                    if self.disable_active_migration {
-                        w.write_var(id as u64);
-                        w.write_var(0);
-                    }
-                }
-                TransportParameterId::MaxDatagramFrameSize => {
-                    if let Some(x) = self.max_datagram_frame_size {
-                        w.write_var(id as u64);
-                        w.write_var(x.size() as u64);
-                        w.write(x);
-                    }
-                }
-                TransportParameterId::PreferredAddress => {
-                    if let Some(ref x) = self.preferred_address {
-                        w.write_var(id as u64);
-                        w.write_var(x.wire_size() as u64);
-                        x.write(w);
-                    }
-                }
-                TransportParameterId::OriginalDestinationConnectionId => {
-                    if let Some(ref cid) = self.original_dst_cid {
-                        w.write_var(id as u64);
-                        w.write_var(cid.len() as u64);
-                        w.put_slice(cid);
-                    }
-                }
-                TransportParameterId::InitialSourceConnectionId => {
-                    if let Some(ref cid) = self.initial_src_cid {
-                        w.write_var(id as u64);
-                        w.write_var(cid.len() as u64);
-                        w.put_slice(cid);
-                    }
-                }
-                TransportParameterId::RetrySourceConnectionId => {
-                    if let Some(ref cid) = self.retry_src_cid {
-                        w.write_var(id as u64);
-                        w.write_var(cid.len() as u64);
-                        w.put_slice(cid);
-                    }
-                }
-                TransportParameterId::GreaseQuicBit => {
-                    if self.grease_quic_bit {
-                        w.write_var(id as u64);
-                        w.write_var(0);
-                    }
-                }
-                TransportParameterId::MinAckDelayDraft07 => {
-                    if let Some(x) = self.min_ack_delay {
-                        w.write_var(id as u64);
-                        w.write_var(x.size() as u64);
-                        w.write(x);
-                    }
-                }
-                id => {
-                    macro_rules! write_params {
-                        {$($(#[$doc:meta])* $name:ident ($id:ident) = $default:expr,)*} => {
-                            match id {
-                                $(TransportParameterId::$id => {
-                                    if self.$name.0 != $default {
-                                        w.write_var(id as u64);
-                                        w.write(VarInt::try_from(self.$name.size()).unwrap());
-                                        w.write(self.$name);
-                                    }
-                                })*,
-                                _ => {
-                                    unimplemented!("Missing implementation of write for transport parameter with code {id:?}");
-                                }
+        macro_rules! write_params {
+            {$($(#[$doc:meta])* $name:ident ($id:ident) = $default:expr,)*} => {
+                for idx in ids {
+                    let id = TransportParameterId::SUPPORTED[*idx as usize];
+                    match id {
+                        TransportParameterId::ReservedTransportParameter => {
+                            if let Some(param) = self.grease_transport_parameter {
+                                param.write(w);
                             }
                         }
+                        TransportParameterId::StatelessResetToken => {
+                            if let Some(ref x) = self.stateless_reset_token {
+                                w.write_var(id as u64);
+                                w.write_var(16);
+                                w.put_slice(x);
+                            }
+                        }
+                        TransportParameterId::DisableActiveMigration => {
+                            if self.disable_active_migration {
+                                w.write_var(id as u64);
+                                w.write_var(0);
+                            }
+                        }
+                        TransportParameterId::MaxDatagramFrameSize => {
+                            if let Some(x) = self.max_datagram_frame_size {
+                                w.write_var(id as u64);
+                                w.write_var(x.size() as u64);
+                                w.write(x);
+                            }
+                        }
+                        TransportParameterId::PreferredAddress => {
+                            if let Some(ref x) = self.preferred_address {
+                                w.write_var(id as u64);
+                                w.write_var(x.wire_size() as u64);
+                                x.write(w);
+                            }
+                        }
+                        TransportParameterId::OriginalDestinationConnectionId => {
+                            if let Some(ref cid) = self.original_dst_cid {
+                                w.write_var(id as u64);
+                                w.write_var(cid.len() as u64);
+                                w.put_slice(cid);
+                            }
+                        }
+                        TransportParameterId::InitialSourceConnectionId => {
+                            if let Some(ref cid) = self.initial_src_cid {
+                                w.write_var(id as u64);
+                                w.write_var(cid.len() as u64);
+                                w.put_slice(cid);
+                            }
+                        }
+                        TransportParameterId::RetrySourceConnectionId => {
+                            if let Some(ref cid) = self.retry_src_cid {
+                                w.write_var(id as u64);
+                                w.write_var(cid.len() as u64);
+                                w.put_slice(cid);
+                            }
+                        }
+                        TransportParameterId::GreaseQuicBit => {
+                            if self.grease_quic_bit {
+                                w.write_var(id as u64);
+                                w.write_var(0);
+                            }
+                        }
+                        TransportParameterId::MinAckDelayDraft07 => {
+                            if let Some(x) = self.min_ack_delay {
+                                w.write_var(id as u64);
+                                w.write_var(x.size() as u64);
+                                w.write(x);
+                            }
+                        }
+                        $(TransportParameterId::$id => {
+                            if self.$name.0 != $default {
+                                w.write_var(id as u64);
+                                w.write(VarInt::try_from(self.$name.size()).unwrap());
+                                w.write(self.$name);
+                            }
+                        },)*
                     }
-                    apply_params!(write_params);
                 }
             }
         }
+        apply_params!(write_params);
     }
 
     /// Decode `TransportParameters` from buffer

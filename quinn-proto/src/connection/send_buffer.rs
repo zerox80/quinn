@@ -5,10 +5,22 @@ use bytes::{Buf, Bytes};
 use crate::{VarInt, range_set::RangeSet};
 
 /// Buffer of outgoing retransmittable stream data
+#[derive(Debug)]
+struct Segment {
+    offset: u64,
+    bytes: Bytes,
+}
+
+impl Segment {
+    fn end(&self) -> u64 {
+        self.offset + self.bytes.len() as u64
+    }
+}
+
 #[derive(Default, Debug)]
 pub(super) struct SendBuffer {
     /// Data queued by the application but not yet acknowledged. May or may not have been sent.
-    unacked_segments: VecDeque<Bytes>,
+    unacked_segments: VecDeque<Segment>,
     /// Total size of `unacked_segments`
     unacked_len: usize,
     /// The first offset that hasn't been written by the application, i.e. the offset past the end of `unacked`
@@ -17,10 +29,6 @@ pub(super) struct SendBuffer {
     ///
     /// Always lies in (offset - unacked.len())..offset
     unsent: u64,
-    /// Acknowledged ranges which couldn't be discarded yet as they don't include the earliest
-    /// offset in `unacked`
-    // TODO: Recover storage from these by compacting (#700)
-    acks: RangeSet,
     /// Previously transmitted ranges deemed lost
     retransmits: RangeSet,
 }
@@ -33,43 +41,76 @@ impl SendBuffer {
 
     /// Append application data to the end of the stream
     pub(super) fn write(&mut self, data: Bytes) {
+        let offset = self.offset;
         self.unacked_len += data.len();
         self.offset += data.len() as u64;
-        self.unacked_segments.push_back(data);
+        self.unacked_segments.push_back(Segment {
+            offset,
+            bytes: data,
+        });
     }
 
     /// Discard a range of acknowledged stream data
-    pub(super) fn ack(&mut self, mut range: Range<u64>) {
-        // Clamp the range to data which is still tracked
-        let base_offset = self.offset - self.unacked_len as u64;
-        range.start = base_offset.max(range.start);
-        range.end = base_offset.max(range.end);
+    pub(super) fn ack(&mut self, range: Range<u64>) {
+        if range.is_empty() {
+            return;
+        }
 
-        self.acks.insert(range);
+        self.retransmits.remove(range.clone());
 
-        while self.acks.min() == Some(self.offset - self.unacked_len as u64) {
-            let prefix = self.acks.pop_min().unwrap();
-            let mut to_advance = (prefix.end - prefix.start) as usize;
+        let mut i = 0;
+        while i < self.unacked_segments.len() {
+            let segment_start = self.unacked_segments[i].offset;
+            let segment_end = self.unacked_segments[i].end();
 
-            self.unacked_len -= to_advance;
-            while to_advance > 0 {
-                let front = self
-                    .unacked_segments
-                    .front_mut()
-                    .expect("Expected buffered data");
+            if segment_end <= range.start {
+                i += 1;
+                continue;
+            }
+            if segment_start >= range.end {
+                break;
+            }
 
-                if front.len() <= to_advance {
-                    to_advance -= front.len();
-                    self.unacked_segments.pop_front();
+            let ack_start = segment_start.max(range.start);
+            let ack_end = segment_end.min(range.end);
+            if ack_start >= ack_end {
+                i += 1;
+                continue;
+            }
 
-                    if self.unacked_segments.len() * 4 < self.unacked_segments.capacity() {
-                        self.unacked_segments.shrink_to_fit();
-                    }
-                } else {
-                    front.advance(to_advance);
-                    to_advance = 0;
+            let removed = (ack_end - ack_start) as usize;
+            self.unacked_len -= removed;
+            match (ack_start == segment_start, ack_end == segment_end) {
+                (true, true) => {
+                    self.unacked_segments.remove(i);
+                }
+                (true, false) => {
+                    let segment = &mut self.unacked_segments[i];
+                    segment.offset = ack_end;
+                    segment.bytes.advance(removed);
+                    i += 1;
+                }
+                (false, true) => {
+                    let keep = (ack_start - segment_start) as usize;
+                    self.unacked_segments[i].bytes.truncate(keep);
+                    i += 1;
+                }
+                (false, false) => {
+                    let keep = (ack_start - segment_start) as usize;
+                    let suffix_start = (ack_end - segment_start) as usize;
+                    let suffix = Segment {
+                        offset: ack_end,
+                        bytes: self.unacked_segments[i].bytes.slice(suffix_start..),
+                    };
+                    self.unacked_segments[i].bytes.truncate(keep);
+                    self.unacked_segments.insert(i + 1, suffix);
+                    i += 2;
                 }
             }
+        }
+
+        if self.unacked_segments.len() * 4 < self.unacked_segments.capacity() {
+            self.unacked_segments.shrink_to_fit();
         }
     }
 
@@ -141,19 +182,13 @@ impl SendBuffer {
     /// should call the function again with an incremented start offset to
     /// retrieve more data.
     pub(super) fn get(&self, offsets: Range<u64>) -> &[u8] {
-        let base_offset = self.offset - self.unacked_len as u64;
-
-        let mut segment_offset = base_offset;
         for segment in self.unacked_segments.iter() {
-            if offsets.start >= segment_offset
-                && offsets.start < segment_offset + segment.len() as u64
-            {
-                let start = (offsets.start - segment_offset) as usize;
-                let end = (offsets.end - segment_offset) as usize;
+            if offsets.start >= segment.offset && offsets.start < segment.end() {
+                let start = (offsets.start - segment.offset) as usize;
+                let end = (offsets.end - segment.offset) as usize;
 
-                return &segment[start..end.min(segment.len())];
+                return &segment.bytes[start..end.min(segment.bytes.len())];
             }
-            segment_offset += segment.len() as u64;
         }
 
         &[]
@@ -162,7 +197,20 @@ impl SendBuffer {
     /// Queue a range of sent but unacknowledged data to be retransmitted
     pub(super) fn retransmit(&mut self, range: Range<u64>) {
         debug_assert!(range.end <= self.unsent, "unsent data can't be lost");
-        self.retransmits.insert(range);
+        if range.is_empty() {
+            return;
+        }
+
+        for segment in self.unacked_segments.iter() {
+            let start = range.start.max(segment.offset);
+            let end = range.end.min(segment.end());
+            if start < end {
+                self.retransmits.insert(start..end);
+            }
+            if segment.offset >= range.end {
+                break;
+            }
+        }
     }
 
     pub(super) fn retransmit_all_for_0rtt(&mut self) {
@@ -190,7 +238,7 @@ impl SendBuffer {
 
     /// Compute the amount of data that hasn't been acknowledged
     pub(super) fn unacked(&self) -> u64 {
-        self.unacked_len as u64 - self.acks.iter().map(|x| x.end - x.start).sum::<u64>()
+        self.unacked_len as u64
     }
 }
 
@@ -339,7 +387,10 @@ mod tests {
         buf.ack(3..5);
         assert_eq!(aggregate_unacked(&buf), &MSG[5..]);
         buf.ack(7..9);
-        assert_eq!(aggregate_unacked(&buf), &MSG[5..]);
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&MSG[5..7]);
+        expected.extend_from_slice(&MSG[9..]);
+        assert_eq!(aggregate_unacked(&buf), expected);
         buf.ack(4..7);
         assert_eq!(aggregate_unacked(&buf), &MSG[9..]);
         buf.ack(0..MSG_LEN);
@@ -365,6 +416,19 @@ mod tests {
     }
 
     #[test]
+    fn retransmit_skips_acked_data() {
+        let mut buf = SendBuffer::new();
+        const MSG: &[u8] = b"abcdef";
+        buf.write(MSG.into());
+        assert_eq!(buf.poll_transmit(64), (0..MSG.len() as u64, true));
+        buf.ack(2..4);
+
+        buf.retransmit(0..MSG.len() as u64);
+        assert_eq!(buf.poll_transmit(64), (0..2, true));
+        assert_eq!(buf.poll_transmit(64), (4..6, true));
+    }
+
+    #[test]
     fn ack() {
         let mut buf = SendBuffer::new();
         const MSG: &[u8] = b"Hello, world!";
@@ -382,16 +446,21 @@ mod tests {
         assert_eq!(buf.poll_transmit(16), (0..16, false));
         assert_eq!(buf.poll_transmit(16), (16..23, true));
         buf.ack(16..23);
-        assert_eq!(aggregate_unacked(&buf), MSG);
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&MSG[..16]);
+        expected.extend_from_slice(&MSG[23..]);
+        assert_eq!(aggregate_unacked(&buf), expected);
+        assert_eq!(buf.get(16..23), &[] as &[u8]);
         buf.ack(0..16);
         assert_eq!(aggregate_unacked(&buf), &MSG[23..]);
-        assert!(buf.acks.is_empty());
+        buf.ack(23..MSG.len() as u64);
+        assert_eq!(aggregate_unacked(&buf), &[] as &[u8]);
     }
 
     fn aggregate_unacked(buf: &SendBuffer) -> Vec<u8> {
         let mut result = Vec::new();
         for segment in buf.unacked_segments.iter() {
-            result.extend_from_slice(&segment[..]);
+            result.extend_from_slice(&segment.bytes[..]);
         }
         result
     }
