@@ -63,9 +63,7 @@ impl Datagrams<'_> {
     ///
     /// Not necessarily the maximum size of received datagrams.
     pub fn max_size(&self) -> Option<usize> {
-        if self.conn.config.datagram_receive_buffer_size.is_none() {
-            return None;
-        }
+        self.conn.config.datagram_receive_buffer_size?;
 
         // We use the conservative overhead bound for any packet number, reducing the budget by at
         // most 3 bytes, so that PN size fluctuations don't cause users sending maximum-size

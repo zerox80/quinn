@@ -2446,9 +2446,8 @@ impl Connection {
 
                 if self.state.is_handshake() && packet.header.is_short() {
                     if let Some(pn) = number {
-                        let spin = match packet.header {
-                            Header::Short { spin, .. } => spin,
-                            _ => unreachable!("checked is_short above"),
+                        let Header::Short { spin, .. } = packet.header else {
+                            unreachable!("checked is_short above")
                         };
                         if self.buffer_handshake_1rtt_packet(now, remote, local_ip, pn, packet) {
                             self.on_packet_authenticated(

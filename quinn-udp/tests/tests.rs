@@ -4,8 +4,10 @@ use std::{
     io::IoSliceMut,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddrV4, UdpSocket},
     slice,
-    time::Duration,
 };
+// `Duration` is only used by the Linux/Android receive-timestamp and transport-error tests.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+use std::time::Duration;
 
 use quinn_udp::{EcnCodepoint, RecvMeta, Transmit, UdpSocketState};
 use socket2::Socket;
