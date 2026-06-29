@@ -16,6 +16,9 @@ use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddrV4, UdpSocket},
     slice,
 };
+// `Duration` is only used by the Linux/Android receive-timestamp and transport-error tests.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+use std::time::Duration;
 
 #[cfg(not(target_os = "wasi"))]
 use quinn_udp::EcnCodepoint;
