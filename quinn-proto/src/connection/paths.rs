@@ -178,14 +178,25 @@ impl PathData {
     }
 
     /// Account for transmission of `packet` with number `pn` in `space`
-    pub(super) fn sent(&mut self, pn: u64, packet: SentPacket, space: &mut PacketSpace) {
+    ///
+    /// Returns a packet that `space` forgot to make room, if any. A forgotten packet may have been
+    /// sent on a *previous* path generation (e.g. when a long non-ACK-eliciting tail spans a path
+    /// change), so it must be debited from the correct path via [`Connection::remove_in_flight`]
+    /// rather than from `self`, which only matches its own generation.
+    ///
+    /// [`Connection::remove_in_flight`]: super::Connection::remove_in_flight
+    #[must_use = "a forgotten packet must be debited from its path's in-flight counters"]
+    pub(super) fn sent(
+        &mut self,
+        pn: u64,
+        packet: SentPacket,
+        space: &mut PacketSpace,
+    ) -> Option<SentPacket> {
         self.in_flight.insert(&packet);
         if self.first_packet.is_none() {
             self.first_packet = Some(pn);
         }
-        if let Some(forgotten) = space.sent(pn, packet) {
-            self.remove_in_flight(&forgotten);
-        }
+        space.sent(pn, packet)
     }
 
     /// Remove `packet` with number `pn` from this path's congestion control counters, or return
@@ -563,6 +574,63 @@ mod tests {
                 now
             ),
             None
+        );
+    }
+
+    #[test]
+    fn sent_surfaces_forgotten_packet_for_cross_path_debit() {
+        use crate::connection::spaces::ThinRetransmits;
+        use crate::frame::StreamMetaVec;
+
+        // A long tail of non-ACK-eliciting packets eventually causes `PacketSpace` to forget the
+        // oldest one. If that tail spans a path change, the forgotten packet belongs to a *previous*
+        // generation, so `PathData::sent` must hand it back to the caller (which debits it from the
+        // correct path) instead of trying — and silently failing — to debit it from the new path.
+        let now = Instant::now();
+        let config = TransportConfig::default();
+        let remote = "203.0.113.1:4433".parse().unwrap();
+
+        let old_generation = 1;
+        let new_generation = 2;
+        let mut old_path = PathData::new(remote, true, None, old_generation, now, &config);
+        let mut new_path = PathData::new(remote, true, None, new_generation, now, &config);
+        let mut space = PacketSpace::new(now);
+
+        let padded_non_ack_eliciting = |generation| SentPacket {
+            path_generation: generation,
+            largest_acked: None,
+            time_sent: now,
+            size: 1, // padded => nonzero in-flight contribution, so a leak would be observable
+            ack_eliciting: false,
+            retransmits: ThinRetransmits::default(),
+            stream_frames: StreamMetaVec::default(),
+        };
+
+        // Fill the non-ACK-eliciting tail right up to (but not past) the forget threshold, all on the
+        // old path/generation.
+        for _ in 0..=1000 {
+            let pn = space.get_tx_number().unwrap();
+            assert!(
+                old_path
+                    .sent(pn, padded_non_ack_eliciting(old_generation), &mut space)
+                    .is_none(),
+                "space should not forget a packet before the tail threshold",
+            );
+        }
+
+        // The next packet is sent after a path change, so the space forgets the oldest
+        // (old-generation) packet while the active path is the new generation.
+        let pn = space.get_tx_number().unwrap();
+        let forgotten = new_path
+            .sent(pn, padded_non_ack_eliciting(new_generation), &mut space)
+            .expect("space should forget an old-generation packet once past the tail threshold");
+
+        assert_eq!(forgotten.path_generation, old_generation);
+        // The new path cannot account for a previous generation's packet — which is exactly why
+        // `sent` returns it for the connection-level, multi-path debit instead of dropping it.
+        assert!(
+            !new_path.remove_in_flight(&forgotten),
+            "current path must not silently absorb a previous generation's forgotten packet",
         );
     }
 }
