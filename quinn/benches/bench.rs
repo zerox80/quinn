@@ -146,7 +146,7 @@ impl Context {
         let runtime = rt();
         let endpoint = {
             let _guard = runtime.enter();
-            Endpoint::client(SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 0)).unwrap()
+            Endpoint::client(SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0)).unwrap()
         };
         let connection = runtime
             .block_on(async {
