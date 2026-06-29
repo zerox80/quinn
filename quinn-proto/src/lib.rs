@@ -1,4 +1,4 @@
-//! Low-level protocol logic for the QUIC protoocol
+//! Low-level protocol logic for the QUIC protocol
 //!
 //! quinn-proto contains a fully deterministic implementation of QUIC protocol logic. It contains
 //! no networking code and does not get any relevant timestamps from the operating system. Most
@@ -19,6 +19,8 @@
 #![allow(clippy::cognitive_complexity)]
 #![allow(clippy::too_many_arguments)]
 #![warn(clippy::use_self)]
+// Every `unsafe` block in this crate must justify its invariants with a `// SAFETY:` comment.
+#![warn(clippy::undocumented_unsafe_blocks)]
 
 use std::{
     fmt,
@@ -277,6 +279,8 @@ impl StreamId {
 
 impl From<StreamId> for VarInt {
     fn from(x: StreamId) -> Self {
+        // SAFETY: stream indices are bounded by `MAX_STREAM_COUNT` (2^60), so the encoded ID
+        // `(index << 2) | flags` is always less than 2^62.
         unsafe { Self::from_u64_unchecked(x.0) }
     }
 }

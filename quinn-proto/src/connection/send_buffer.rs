@@ -96,6 +96,8 @@ impl SendBuffer {
             // When the offset is known, we know how many bytes are required to encode it.
             // Offset 0 requires no space
             if range.start != 0 {
+                // SAFETY: stream/crypto offsets are encoded as QUIC variable-length integers and
+                // are kept within flow-control limits, so they are always less than 2^62.
                 max_len -= VarInt::size(unsafe { VarInt::from_u64_unchecked(range.start) });
             }
             if range.end - range.start < max_len as u64 {
@@ -115,6 +117,8 @@ impl SendBuffer {
         // When the offset is known, we know how many bytes are required to encode it.
         // Offset 0 requires no space
         if self.unsent != 0 {
+            // SAFETY: stream/crypto offsets are encoded as QUIC variable-length integers and
+            // are kept within flow-control limits, so they are always less than 2^62.
             max_len -= VarInt::size(unsafe { VarInt::from_u64_unchecked(self.unsent) });
         }
         if self.offset - self.unsent < max_len as u64 {
