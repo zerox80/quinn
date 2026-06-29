@@ -735,4 +735,22 @@ mod tests {
             K_MAX_INITIAL_CONGESTION_WINDOW * BASE_DATAGRAM_SIZE
         );
     }
+
+    #[test]
+    fn initial_window_override_restores_rfc_window() {
+        // The aggressive default startup window is deliberately opt-out: callers that need RFC
+        // 9002's recommended ~10-datagram initial window can restore it via
+        // `BbrConfig::initial_window`, and the override must reach the built controller's starting
+        // congestion window. This guards the documented escape hatch against regressions.
+        let rfc_initial_window = 14720.clamp(2 * BASE_DATAGRAM_SIZE, 10 * BASE_DATAGRAM_SIZE);
+        assert!(rfc_initial_window < K_MAX_INITIAL_CONGESTION_WINDOW * BASE_DATAGRAM_SIZE);
+
+        let mut config = BbrConfig::default();
+        config.initial_window(rfc_initial_window);
+        assert_eq!(config.initial_window, rfc_initial_window);
+
+        let bbr = Bbr::new(Arc::new(config), 1200);
+        assert_eq!(bbr.init_cwnd, rfc_initial_window);
+        assert_eq!(bbr.cwnd, rfc_initial_window);
+    }
 }

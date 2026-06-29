@@ -1476,9 +1476,39 @@ fn path_changed_isolates_old_in_flight_packets() {
         "old-path ACK was not processed"
     );
     assert_eq!(server.bytes_in_flight(), 0);
-    assert_eq!(server.previous_path_bytes_in_flight(), Some(0));
+    // Once the old path's in-flight packets are all acked, the now-empty previous path is reaped:
+    // `path_changed` leaves the active path already validated, so there is nothing left to retain.
+    assert_eq!(server.previous_path_bytes_in_flight(), None);
     assert_eq!(server.path_mtu(), mtu_before);
     assert_eq!(server.congestion_window(), congestion_window_before);
+}
+
+#[test]
+fn migration_reaps_previous_path_once_drained() {
+    let _guard = subscribe();
+    let mut pair = Pair::default();
+    let (client_ch, server_ch) = pair.connect();
+    pair.drive();
+
+    let original_generation = pair.server_conn_mut(server_ch).path_generation();
+
+    // A genuine peer address migration: the server validates the new path while retaining the old
+    // one as a fallback and to keep accounting its still-in-flight packets.
+    migrate_client_to_new_port(&mut pair, client_ch, server_ch);
+    pair.drive();
+
+    let new_addr = pair.client.addr;
+    let server = pair.server_conn_mut(server_ch);
+    assert_ne!(
+        server.path_generation(),
+        original_generation,
+        "migration should advance to a new path generation"
+    );
+    assert_eq!(server.remote_address(), new_addr);
+    // Reaping must not disturb a live migration — had it dropped the fallback path mid-validation,
+    // the migration above could not have completed. Once the migration finished and the previous
+    // path drained, it is released instead of lingering until the next path change.
+    assert_eq!(server.previous_path_bytes_in_flight(), None);
 }
 
 #[test]
