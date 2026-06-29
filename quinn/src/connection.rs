@@ -1357,6 +1357,13 @@ pub enum SendDatagramError {
 ///
 /// This limits the amount of CPU resources consumed by datagram generation,
 /// and allows other tasks (like receiving ACKs) to run in between.
+///
+/// Tied to [`IO_LOOP_BOUND`] (160) rather than a smaller standalone value so that a single
+/// `drive_transmit` pass can fill the same per-poll budget the rest of the driver loop uses. This
+/// favors throughput on high-bandwidth links (fewer yield/repoll cycles per byte sent) at the cost
+/// of slightly coarser fairness: the task yields to ACK processing and other work less frequently
+/// within a burst. GSO segments are counted individually (see [`transmit_datagram_count`]), so the
+/// bound caps actual datagrams on the wire, not just `poll_transmit` calls.
 const MAX_TRANSMIT_DATAGRAMS: usize = IO_LOOP_BOUND;
 
 /// The maximum amount of datagrams that are sent in a single transmit

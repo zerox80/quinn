@@ -534,6 +534,18 @@ impl BbrConfig {
 }
 
 impl Default for BbrConfig {
+    /// Uses BBR's maximum initial congestion window (`K_MAX_INITIAL_CONGESTION_WINDOW`
+    /// datagrams) as the startup window.
+    ///
+    /// This is deliberately far more aggressive than RFC 9002's recommended ~10-datagram
+    /// initial window: it lets BBR's bandwidth probing ramp up within the first few RTTs on
+    /// high-bandwidth or high-RTT links (e.g. VPN tunnels), which is the primary target of this
+    /// build. The trade-off is a larger initial burst, which can induce loss on a severely
+    /// constrained or heavily shared path before BBR has an RTT/bandwidth sample.
+    ///
+    /// Callers that need standards-conformant behavior on the open internet should override this
+    /// via [`BbrConfig::initial_window`], e.g. with
+    /// `14720.clamp(2 * BASE_DATAGRAM_SIZE, 10 * BASE_DATAGRAM_SIZE)`.
     fn default() -> Self {
         Self {
             initial_window: K_MAX_INITIAL_CONGESTION_WINDOW * BASE_DATAGRAM_SIZE,
