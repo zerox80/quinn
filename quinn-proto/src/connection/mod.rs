@@ -1929,6 +1929,9 @@ impl Connection {
             self.path.mtud.on_probe_lost();
             self.stats.path.lost_plpmtud_probes += 1;
         }
+
+        // Acks and losses above may have drained the previous path; release it once it is empty.
+        self.reap_prev_path();
     }
 
     fn loss_time_and_space(&self) -> Option<(Instant, SpaceId)> {
@@ -3926,6 +3929,28 @@ impl Connection {
         {
             if path.remove_in_flight(packet) {
                 return;
+            }
+        }
+    }
+
+    /// Release `prev_path` once it has served its purpose, to avoid retaining a stale path
+    ///
+    /// After `path_changed` the active path is already validated, so the previous path is kept
+    /// solely to keep accounting its still-in-flight packets against the correct congestion
+    /// controller. Once those packets have all been acked or lost, the previous path carries no
+    /// state worth retaining and can be dropped.
+    ///
+    /// During `migrate` the active path is *not* yet validated and the previous path is the
+    /// fallback we restore on `Timer::PathValidation` failure (see the `PathValidation` arm in
+    /// `handle_timeout`); the `self.path.challenge.is_none()` guard ensures we never reap it then.
+    fn reap_prev_path(&mut self) {
+        if self.path.challenge.is_some() {
+            // Active path still validating: keep the fallback.
+            return;
+        }
+        if let Some((_, prev)) = &self.prev_path {
+            if !prev.challenge_pending && prev.in_flight.bytes == 0 {
+                self.prev_path = None;
             }
         }
     }
