@@ -1897,14 +1897,24 @@ impl Connection {
                 }
             }
 
-            // Don't apply congestion penalty for lost ack-only packets
-            let lost_ack_eliciting = old_bytes_in_flight != self.path.in_flight.bytes;
+            // Don't apply a congestion penalty for lost ack-only packets. Only losses on the
+            // *active* path change `self.path.in_flight.bytes` and populate
+            // `active_largest_lost_sent` (see `remove_in_flight`), so a previous path's losses after
+            // migration never reach the active path's congestion controller. The `if let` keeps this
+            // robust against a panic should that invariant ever be weakened by a refactor.
+            let lost_active_ack_eliciting = old_bytes_in_flight != self.path.in_flight.bytes;
+            debug_assert!(
+                !lost_active_ack_eliciting || active_largest_lost_sent.is_some(),
+                "active-path in-flight bytes changed without recording an active-path loss",
+            );
 
-            if lost_ack_eliciting {
+            if let (true, Some(active_largest_lost_sent)) =
+                (lost_active_ack_eliciting, active_largest_lost_sent)
+            {
                 self.stats.path.congestion_events += 1;
                 self.path.congestion.on_congestion_event(
                     now,
-                    active_largest_lost_sent.unwrap(),
+                    active_largest_lost_sent,
                     in_persistent_congestion,
                     false,
                     active_size_of_lost_packets,
