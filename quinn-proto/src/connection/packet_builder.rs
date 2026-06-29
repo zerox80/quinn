@@ -218,8 +218,14 @@ impl PacketBuilder {
             stream_frames: sent.stream_frames,
         };
 
-        conn.path
+        let forgotten = conn
+            .path
             .sent(exact_number, packet, &mut conn.spaces[space_id]);
+        if let Some(forgotten) = forgotten {
+            // The forgotten packet may belong to a previous path generation, so debit it via the
+            // connection-level helper that walks every known path rather than the active one only.
+            conn.remove_in_flight(&forgotten);
+        }
         conn.stats.path.sent_packets += 1;
         conn.reset_keep_alive(now);
         if size != 0 {
