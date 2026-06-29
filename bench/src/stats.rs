@@ -91,5 +91,26 @@ impl TransferResult {
 }
 
 pub fn throughput_bps(duration: Duration, size: u64) -> f64 {
-    (size as f64) / (duration.as_secs_f64())
+    let seconds = duration.as_secs_f64();
+    if seconds == 0.0 {
+        0.0
+    } else {
+        (size as f64) / seconds
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn throughput_is_zero_for_zero_duration() {
+        assert_eq!(throughput_bps(Duration::ZERO, 1024), 0.0);
+    }
+
+    #[test]
+    fn transfer_result_uses_finite_throughput() {
+        let result = TransferResult::new(Duration::ZERO, 1024);
+        assert_eq!(result.throughput, 0.0);
+    }
 }
