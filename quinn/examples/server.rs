@@ -132,10 +132,14 @@ async fn run(options: Opt) -> Result<()> {
     let transport_config = Arc::get_mut(&mut server_config.transport).unwrap();
     transport_config.max_concurrent_uni_streams(0_u8.into());
 
-    let root = Arc::<Path>::from(options.root.clone());
-    if !root.exists() {
-        bail!("root path does not exist");
+    let root = options
+        .root
+        .canonicalize()
+        .context("failed to resolve root path")?;
+    if !root.is_dir() {
+        bail!("root path is not a directory");
     }
+    let root = Arc::<Path>::from(root);
 
     let endpoint = quinn::Endpoint::server(server_config, options.listen)?;
     eprintln!("listening on {}", endpoint.local_addr()?);
@@ -225,22 +229,39 @@ async fn handle_request(
         escaped.push_str(str::from_utf8(&part).unwrap());
     }
     info!(content = %escaped);
-    // Execute the request
-    let resp = process_get(&root, &req).unwrap_or_else(|e| {
-        error!("failed: {}", e);
-        format!("failed to process request: {e}\n").into_bytes()
-    });
-    // Write the response
-    send.write_all(&resp)
-        .await
-        .map_err(|e| anyhow!("failed to send response: {}", e))?;
+    match resolve_get_path(&root, &req) {
+        Ok(path) => {
+            let mut file = match tokio::fs::File::open(&path).await {
+                Ok(file) => file,
+                Err(e) => {
+                    error!("failed: {}", e);
+                    let resp = format!("failed to process request: failed reading file: {e}\n");
+                    send.write_all(resp.as_bytes())
+                        .await
+                        .map_err(|e| anyhow!("failed to send response: {}", e))?;
+                    send.finish().unwrap();
+                    return Ok(());
+                }
+            };
+            tokio::io::copy(&mut file, &mut send)
+                .await
+                .map_err(|e| anyhow!("failed to send response: {}", e))?;
+        }
+        Err(e) => {
+            error!("failed: {}", e);
+            let resp = format!("failed to process request: {e}\n");
+            send.write_all(resp.as_bytes())
+                .await
+                .map_err(|e| anyhow!("failed to send response: {}", e))?;
+        }
+    }
     // Gracefully terminate the stream
     send.finish().unwrap();
     info!("complete");
     Ok(())
 }
 
-fn process_get(root: &Path, x: &[u8]) -> Result<Vec<u8>> {
+fn resolve_get_path(root: &Path, x: &[u8]) -> Result<PathBuf> {
     if x.len() < 4 || &x[0..4] != b"GET " {
         bail!("missing GET");
     }
@@ -269,6 +290,104 @@ fn process_get(root: &Path, x: &[u8]) -> Result<Vec<u8>> {
             }
         }
     }
-    let data = fs::read(&real_path).context("failed reading file")?;
-    Ok(data)
+    let real_path = real_path
+        .canonicalize()
+        .context("failed resolving file path")?;
+    if !real_path.starts_with(root) {
+        bail!("path escapes root");
+    }
+    Ok(real_path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_get_path;
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    struct TempDir {
+        path: PathBuf,
+    }
+
+    impl TempDir {
+        fn new() -> Self {
+            let mut path = std::env::temp_dir();
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            path.push(format!(
+                "quinn-example-server-{}-{nanos}",
+                std::process::id()
+            ));
+            fs::create_dir(&path).unwrap();
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    #[test]
+    fn resolves_absolute_paths_under_root() {
+        let dir = TempDir::new();
+        fs::write(dir.path().join("file.txt"), b"hello").unwrap();
+        let root = dir.path().canonicalize().unwrap();
+
+        let path = resolve_get_path(&root, b"GET /file.txt\r\n").unwrap();
+
+        assert_eq!(path, root.join("file.txt"));
+    }
+
+    #[test]
+    fn rejects_relative_paths() {
+        let dir = TempDir::new();
+        let root = dir.path().canonicalize().unwrap();
+
+        assert!(resolve_get_path(&root, b"GET file.txt\r\n").is_err());
+    }
+
+    #[test]
+    fn rejects_parent_components() {
+        let dir = TempDir::new();
+        let root = dir.path().canonicalize().unwrap();
+
+        assert!(resolve_get_path(&root, b"GET /../file.txt\r\n").is_err());
+    }
+
+    #[test]
+    fn rejects_missing_files() {
+        let dir = TempDir::new();
+        let root = dir.path().canonicalize().unwrap();
+
+        assert!(resolve_get_path(&root, b"GET /missing.txt\r\n").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlinks_that_escape_root() {
+        use std::os::unix::fs::symlink;
+
+        let root_dir = TempDir::new();
+        let outside_dir = TempDir::new();
+        fs::write(outside_dir.path().join("secret.txt"), b"secret").unwrap();
+        symlink(
+            outside_dir.path().join("secret.txt"),
+            root_dir.path().join("link.txt"),
+        )
+        .unwrap();
+        let root = root_dir.path().canonicalize().unwrap();
+
+        assert!(resolve_get_path(&root, b"GET /link.txt\r\n").is_err());
+    }
 }

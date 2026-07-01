@@ -5,6 +5,11 @@ updates:
   schedule:
     interval: weekly
     time: "13:00"
+- package-ecosystem: cargo
+  directory: "/fuzz"
+  schedule:
+    interval: weekly
+    time: "13:00"
 - package-ecosystem: github-actions
   directory: "/"
   schedule:
