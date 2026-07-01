@@ -20,6 +20,8 @@ use url::Url;
 
 mod common;
 
+const DEFAULT_MAX_RESPONSE_SIZE: usize = 10 * 1024 * 1024;
+
 /// HTTP/0.9 over QUIC client
 #[derive(Parser, Debug)]
 #[clap(name = "client")]
@@ -45,6 +47,10 @@ struct Opt {
     /// Address to bind on
     #[clap(long = "bind", default_value = "[::]:0")]
     bind: SocketAddr,
+
+    /// Maximum response size to buffer, in bytes
+    #[clap(long = "max-response-size", default_value_t = DEFAULT_MAX_RESPONSE_SIZE)]
+    max_response_size: usize,
 }
 
 fn main() {
@@ -135,7 +141,7 @@ async fn run(options: Opt) -> Result<()> {
     let response_start = Instant::now();
     eprintln!("request sent at {:?}", response_start - start);
     let resp = recv
-        .read_to_end(usize::MAX)
+        .read_to_end(options.max_response_size)
         .await
         .map_err(|e| anyhow!("failed to read response: {}", e))?;
     let duration = response_start.elapsed();
