@@ -20,6 +20,7 @@ assert_matches = "1.1"
 aws-lc-rs = { version = "1.9", default-features = false }
 bencher = "0.1.5"
 bytes = "1"
+cap-std = "4.0.2"
 clap = { version = "4", features = ["derive"] }
 crc = "3"
 directories-next = "2"
@@ -45,6 +46,7 @@ slab = "0.4.6"
 smol = "2"
 socket2 = ">=0.5, <0.7"
 thiserror = "2.0.3"
+tempfile = "3"
 tinyvec = { version = "1.1", features = ["alloc"] }
 tokio = { version = "1.28.1", features = ["sync"] }
 tracing = { version = "0.1.10", default-features = false, features = ["std"] }

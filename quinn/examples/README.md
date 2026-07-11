@@ -61,7 +61,7 @@ This example will make a QUIC connection on localhost, and you should see output
 The `insecure_connection.rs` example demonstrates how to make a QUIC connection that ignores the server certificate.
 
 ```text
-$ cargo run --example insecure_connection --features="rustls/dangerous_configuration"
+$ cargo run --example insecure_connection
 ```
 
 ## Single Socket Example

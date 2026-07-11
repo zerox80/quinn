@@ -5,15 +5,17 @@
 use std::{
     ascii, fs, io,
     net::SocketAddr,
-    path::{self, Path, PathBuf},
+    path::{self, PathBuf},
     str,
     sync::Arc,
 };
 
 use anyhow::{Context, Result, anyhow, bail};
+use cap_std::{ambient_authority, fs::Dir};
 use clap::Parser;
 use proto::crypto::rustls::QuicServerConfig;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, pem::PemObject};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError};
 use tracing::{error, info, info_span};
 use tracing_futures::Instrument as _;
 
@@ -132,35 +134,34 @@ async fn run(options: Opt) -> Result<()> {
     let transport_config = Arc::get_mut(&mut server_config.transport).unwrap();
     transport_config.max_concurrent_uni_streams(0_u8.into());
 
-    let root = options
-        .root
-        .canonicalize()
-        .context("failed to resolve root path")?;
-    if !root.is_dir() {
-        bail!("root path is not a directory");
-    }
-    let root = Arc::<Path>::from(root);
+    let root = Arc::new(
+        Dir::open_ambient_dir(&options.root, ambient_authority())
+            .context("failed to open root directory")?,
+    );
+    let connection_slots = options
+        .connection_limit
+        .map(|limit| Arc::new(Semaphore::new(limit)));
 
     let endpoint = quinn::Endpoint::server(server_config, options.listen)?;
     eprintln!("listening on {}", endpoint.local_addr()?);
 
     while let Some(conn) = endpoint.accept().await {
-        if options
-            .connection_limit
-            .is_some_and(|n| endpoint.open_connections() >= n)
-        {
-            info!("refusing due to open connection limit");
-            conn.refuse();
-        } else if Some(conn.remote_address()) == options.block {
+        if Some(conn.remote_address()) == options.block {
             info!("refusing blocked client IP address");
             conn.refuse();
         } else if options.stateless_retry && !conn.remote_address_validated() {
             info!("requiring connection to validate its address");
             conn.retry().unwrap();
         } else {
+            let Ok(permit) = reserve_connection_slot(connection_slots.as_ref()) else {
+                info!("refusing due to open connection limit");
+                conn.refuse();
+                continue;
+            };
             info!("accepting connection");
             let fut = handle_connection(root.clone(), conn);
             tokio::spawn(async move {
+                let _permit = permit;
                 if let Err(e) = fut.await {
                     error!("connection failed: {reason}", reason = e.to_string())
                 }
@@ -171,7 +172,15 @@ async fn run(options: Opt) -> Result<()> {
     Ok(())
 }
 
-async fn handle_connection(root: Arc<Path>, conn: quinn::Incoming) -> Result<()> {
+fn reserve_connection_slot(
+    slots: Option<&Arc<Semaphore>>,
+) -> Result<Option<OwnedSemaphorePermit>, TryAcquireError> {
+    slots
+        .map(|slots| slots.clone().try_acquire_owned())
+        .transpose()
+}
+
+async fn handle_connection(root: Arc<Dir>, conn: quinn::Incoming) -> Result<()> {
     let connection = conn.await?;
     let span = info_span!(
         "connection",
@@ -216,7 +225,7 @@ async fn handle_connection(root: Arc<Path>, conn: quinn::Incoming) -> Result<()>
 }
 
 async fn handle_request(
-    root: Arc<Path>,
+    root: Arc<Dir>,
     (mut send, mut recv): (quinn::SendStream, quinn::RecvStream),
 ) -> Result<()> {
     let req = recv
@@ -229,9 +238,9 @@ async fn handle_request(
         escaped.push_str(str::from_utf8(&part).unwrap());
     }
     info!(content = %escaped);
-    match resolve_get_path(&root, &req) {
+    match parse_get_path(&req) {
         Ok(path) => {
-            let mut file = match tokio::fs::File::open(&path).await {
+            let mut file = match open_file(root, path).await {
                 Ok(file) => file,
                 Err(e) => {
                     error!("failed: {}", e);
@@ -261,7 +270,14 @@ async fn handle_request(
     Ok(())
 }
 
-fn resolve_get_path(root: &Path, x: &[u8]) -> Result<PathBuf> {
+async fn open_file(root: Arc<Dir>, path: PathBuf) -> io::Result<tokio::fs::File> {
+    let file = tokio::task::spawn_blocking(move || root.open(path))
+        .await
+        .map_err(io::Error::other)??;
+    Ok(tokio::fs::File::from_std(file.into_std()))
+}
+
+fn parse_get_path(x: &[u8]) -> Result<PathBuf> {
     if x.len() < 4 || &x[0..4] != b"GET " {
         bail!("missing GET");
     }
@@ -271,8 +287,8 @@ fn resolve_get_path(root: &Path, x: &[u8]) -> Result<PathBuf> {
     let x = &x[4..x.len() - 2];
     let end = x.iter().position(|&c| c == b' ').unwrap_or(x.len());
     let path = str::from_utf8(&x[..end]).context("path is malformed UTF-8")?;
-    let path = Path::new(&path);
-    let mut real_path = PathBuf::from(root);
+    let path = path::Path::new(&path);
+    let mut relative_path = PathBuf::new();
     let mut components = path.components();
     match components.next() {
         Some(path::Component::RootDir) => {}
@@ -283,94 +299,61 @@ fn resolve_get_path(root: &Path, x: &[u8]) -> Result<PathBuf> {
     for c in components {
         match c {
             path::Component::Normal(x) => {
-                real_path.push(x);
+                relative_path.push(x);
             }
             x => {
                 bail!("illegal component in path: {:?}", x);
             }
         }
     }
-    let real_path = real_path
-        .canonicalize()
-        .context("failed resolving file path")?;
-    if !real_path.starts_with(root) {
-        bail!("path escapes root");
-    }
-    Ok(real_path)
+    Ok(relative_path)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_get_path;
-    use std::{
-        fs,
-        path::{Path, PathBuf},
-        time::{SystemTime, UNIX_EPOCH},
-    };
+    use super::{parse_get_path, reserve_connection_slot};
+    use cap_std::{ambient_authority, fs::Dir};
+    #[cfg(unix)]
+    use std::fs;
+    use std::{path::PathBuf, sync::Arc};
+    use tempfile::tempdir;
+    use tokio::sync::Semaphore;
 
-    struct TempDir {
-        path: PathBuf,
-    }
+    #[test]
+    fn connection_slots_are_reserved_until_permits_are_dropped() {
+        let slots = Arc::new(Semaphore::new(1));
+        let permit = reserve_connection_slot(Some(&slots)).unwrap().unwrap();
 
-    impl TempDir {
-        fn new() -> Self {
-            let mut path = std::env::temp_dir();
-            let nanos = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos();
-            path.push(format!(
-                "quinn-example-server-{}-{nanos}",
-                std::process::id()
-            ));
-            fs::create_dir(&path).unwrap();
-            Self { path }
-        }
-
-        fn path(&self) -> &Path {
-            &self.path
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.path);
-        }
+        assert!(reserve_connection_slot(Some(&slots)).is_err());
+        drop(permit);
+        assert!(reserve_connection_slot(Some(&slots)).is_ok());
+        assert!(reserve_connection_slot(None).unwrap().is_none());
     }
 
     #[test]
-    fn resolves_absolute_paths_under_root() {
-        let dir = TempDir::new();
-        fs::write(dir.path().join("file.txt"), b"hello").unwrap();
-        let root = dir.path().canonicalize().unwrap();
+    fn parses_absolute_paths_relative_to_root() {
+        let path = parse_get_path(b"GET /directory/file.txt\r\n").unwrap();
 
-        let path = resolve_get_path(&root, b"GET /file.txt\r\n").unwrap();
-
-        assert_eq!(path, root.join("file.txt"));
+        assert_eq!(path, PathBuf::from("directory").join("file.txt"));
     }
 
     #[test]
     fn rejects_relative_paths() {
-        let dir = TempDir::new();
-        let root = dir.path().canonicalize().unwrap();
-
-        assert!(resolve_get_path(&root, b"GET file.txt\r\n").is_err());
+        assert!(parse_get_path(b"GET file.txt\r\n").is_err());
     }
 
     #[test]
     fn rejects_parent_components() {
-        let dir = TempDir::new();
-        let root = dir.path().canonicalize().unwrap();
-
-        assert!(resolve_get_path(&root, b"GET /../file.txt\r\n").is_err());
+        assert!(parse_get_path(b"GET /../file.txt\r\n").is_err());
     }
 
     #[test]
     fn rejects_missing_files() {
-        let dir = TempDir::new();
-        let root = dir.path().canonicalize().unwrap();
+        let dir = tempdir().unwrap();
+        let root = Dir::open_ambient_dir(dir.path(), ambient_authority()).unwrap();
+        let path = parse_get_path(b"GET /missing.txt\r\n").unwrap();
 
-        assert!(resolve_get_path(&root, b"GET /missing.txt\r\n").is_err());
+        assert!(root.open(path).is_err());
     }
 
     #[cfg(unix)]
@@ -378,16 +361,17 @@ mod tests {
     fn rejects_symlinks_that_escape_root() {
         use std::os::unix::fs::symlink;
 
-        let root_dir = TempDir::new();
-        let outside_dir = TempDir::new();
+        let root_dir = tempdir().unwrap();
+        let outside_dir = tempdir().unwrap();
         fs::write(outside_dir.path().join("secret.txt"), b"secret").unwrap();
         symlink(
             outside_dir.path().join("secret.txt"),
             root_dir.path().join("link.txt"),
         )
         .unwrap();
-        let root = root_dir.path().canonicalize().unwrap();
+        let root = Dir::open_ambient_dir(root_dir.path(), ambient_authority()).unwrap();
+        let path = parse_get_path(b"GET /link.txt\r\n").unwrap();
 
-        assert!(resolve_get_path(&root, b"GET /link.txt\r\n").is_err());
+        assert!(root.open(path).is_err());
     }
 }

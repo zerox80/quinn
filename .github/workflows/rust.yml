@@ -184,6 +184,10 @@ jobs:
         run: cargo doc --locked --no-deps --document-private-items
         env:
           RUSTDOCFLAGS: -Dwarnings
+      - name: doc docs.rs feature set
+        run: |
+          features="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json, sys; metadata = json.load(sys.stdin); package = next(package for package in metadata["packages"] if package["name"] == "quinn-proto"); print(",".join(package["metadata"]["docs"]["rs"]["features"]))')"
+          cargo doc --locked --no-deps --package quinn-proto --features "$features"
       - name: lint fuzz
         run: |
           cd fuzz
