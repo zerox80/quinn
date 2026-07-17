@@ -86,6 +86,18 @@ impl Connecting {
         }
     }
 
+    fn connection_ref(&self) -> &ConnectionRef {
+        self.conn
+            .as_ref()
+            .expect("connecting future already completed")
+    }
+
+    fn take_connection(&mut self) -> ConnectionRef {
+        self.conn
+            .take()
+            .expect("connecting future already completed")
+    }
+
     /// Convert into a 0-RTT or 0.5-RTT connection at the cost of weakened security
     ///
     /// Returns `Ok` immediately if the local endpoint is able to attempt sending 0/0.5-RTT data.
@@ -134,13 +146,13 @@ impl Connecting {
     pub fn into_0rtt(mut self) -> Result<Connection, Self> {
         // This lock borrows `self` and would normally be dropped at the end of this scope, so we'll
         // have to release it explicitly before returning `self` by value.
-        let conn = (self.conn.as_mut().unwrap()).state.lock("into_0rtt");
+        let conn = self.connection_ref().state.lock("into_0rtt");
 
         let is_ok = conn.inner.has_0rtt() || conn.inner.side().is_server();
         drop(conn);
 
         if is_ok {
-            let conn = self.conn.take().unwrap();
+            let conn = self.take_connection();
             Ok(Connection(conn))
         } else {
             Err(self)
@@ -160,7 +172,7 @@ impl Connecting {
         if let Some(x) = self.handshake_data_ready.take() {
             let _ = x.await;
         }
-        let conn = self.conn.as_ref().unwrap();
+        let conn = self.connection_ref();
         let inner = conn.state.lock("handshake");
         inner
             .inner
@@ -186,7 +198,7 @@ impl Connecting {
     ///
     /// Will panic if called after `poll` has returned `Ready`.
     pub fn local_ip(&self) -> Option<IpAddr> {
-        let conn = self.conn.as_ref().unwrap();
+        let conn = self.connection_ref();
         let inner = conn.state.lock("local_ip");
 
         inner.inner.local_ip()
@@ -196,8 +208,11 @@ impl Connecting {
     ///
     /// Will panic if called after `poll` has returned `Ready`.
     pub fn remote_address(&self) -> SocketAddr {
-        let conn_ref: &ConnectionRef = self.conn.as_ref().expect("used after yielding Ready");
-        conn_ref.state.lock("remote_address").inner.remote_address()
+        self.connection_ref()
+            .state
+            .lock("remote_address")
+            .inner
+            .remote_address()
     }
 }
 
@@ -205,7 +220,7 @@ impl Future for Connecting {
     type Output = Result<Connection, ConnectionError>;
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         Pin::new(&mut self.connected).poll(cx).map(|_| {
-            let conn = self.conn.take().unwrap();
+            let conn = self.take_connection();
             let inner = conn.state.lock("connecting");
             if inner.connected {
                 drop(inner);

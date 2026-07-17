@@ -8,7 +8,7 @@ use std::{
     pin::Pin,
     str,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, MutexGuard,
         atomic::{AtomicUsize, Ordering},
     },
     task::{Context, Poll, RawWaker, RawWakerVTable, Waker},
@@ -104,7 +104,7 @@ impl Endpoint {
 
     /// Returns relevant stats from this Endpoint
     pub fn stats(&self) -> EndpointStats {
-        self.inner.state.lock().unwrap().stats
+        self.inner.lock_state().stats
     }
 
     /// Helper to construct an endpoint for use with both incoming and outgoing connections
@@ -201,7 +201,7 @@ impl Endpoint {
 
     /// Set the client configuration used by `connect`
     pub fn set_default_client_config(&self, config: ClientConfig) {
-        self.inner.0.state.lock().unwrap().default_client_config = Some(config);
+        self.inner.lock_state().default_client_config = Some(config);
     }
 
     /// Connect to a remote endpoint
@@ -213,15 +213,7 @@ impl Endpoint {
     /// May fail immediately due to configuration errors, or in the future if the connection could
     /// not be established.
     pub fn connect(&self, addr: SocketAddr, server_name: &str) -> Result<Connecting, ConnectError> {
-        let Some(config) = self
-            .inner
-            .0
-            .state
-            .lock()
-            .unwrap()
-            .default_client_config
-            .clone()
-        else {
+        let Some(config) = self.inner.lock_state().default_client_config.clone() else {
             return Err(ConnectError::NoDefaultClientConfig);
         };
 
@@ -239,7 +231,7 @@ impl Endpoint {
         addr: SocketAddr,
         server_name: &str,
     ) -> Result<Connecting, ConnectError> {
-        let mut endpoint = self.inner.state.lock().unwrap();
+        let mut endpoint = self.inner.lock_state();
         if endpoint.driver_lost || endpoint.recv_state.connections.close.is_some() {
             return Err(ConnectError::EndpointStopping);
         }
@@ -280,7 +272,7 @@ impl Endpoint {
     /// On error, the old UDP socket is retained.
     pub fn rebind_abstract(&self, socket: Box<dyn AsyncUdpSocket>) -> io::Result<()> {
         let addr = socket.local_addr()?;
-        let mut inner = self.inner.state.lock().unwrap();
+        let mut inner = self.inner.lock_state();
         let old_socket = mem::replace(&mut inner.socket, socket);
         inner.prev_sockets.push_back(old_socket);
         while inner.prev_sockets.len() > MAX_PREV_SOCKETS {
@@ -306,21 +298,19 @@ impl Endpoint {
     /// Useful for e.g. refreshing TLS certificates without disrupting existing connections.
     pub fn set_server_config(&self, server_config: Option<ServerConfig>) {
         self.inner
-            .state
-            .lock()
-            .unwrap()
+            .lock_state()
             .inner
             .set_server_config(server_config.map(Arc::new))
     }
 
     /// Get the local `SocketAddr` the underlying socket is bound to
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
-        self.inner.state.lock().unwrap().socket.local_addr()
+        self.inner.lock_state().socket.local_addr()
     }
 
     /// Get the number of connections that are currently open
     pub fn open_connections(&self) -> usize {
-        self.inner.state.lock().unwrap().inner.open_connections()
+        self.inner.lock_state().inner.open_connections()
     }
 
     /// Close all of this endpoint's connections immediately and cease accepting new connections.
@@ -330,7 +320,7 @@ impl Endpoint {
     /// [`Connection::close()`]: crate::Connection::close
     pub fn close(&self, error_code: VarInt, reason: &[u8]) {
         let reason = Bytes::copy_from_slice(reason);
-        let mut endpoint = self.inner.state.lock().unwrap();
+        let mut endpoint = self.inner.lock_state();
         endpoint.recv_state.connections.close = Some((error_code, reason.clone()));
         for sender in endpoint.recv_state.connections.senders.values() {
             // Ignoring errors from dropped connections
@@ -355,7 +345,7 @@ impl Endpoint {
     pub async fn wait_idle(&self) {
         loop {
             {
-                let endpoint = &mut *self.inner.state.lock().unwrap();
+                let endpoint = &mut *self.inner.lock_state();
                 if endpoint.recv_state.connections.is_empty() {
                     break;
                 }
@@ -399,7 +389,7 @@ impl Future for EndpointDriver {
     type Output = Result<(), io::Error>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let mut endpoint = self.0.state.lock().unwrap();
+        let mut endpoint = self.0.lock_state();
         if endpoint.driver.is_none() {
             endpoint.driver = Some(cx.waker().clone());
         }
@@ -432,7 +422,7 @@ impl Future for EndpointDriver {
 
 impl Drop for EndpointDriver {
     fn drop(&mut self) {
-        let mut endpoint = self.0.state.lock().unwrap();
+        let mut endpoint = self.0.lock_state();
         endpoint.driver_lost = true;
         self.0.shared.incoming.notify_waiters();
         // Drop all outgoing channels, signaling the termination of the endpoint to the associated
@@ -443,17 +433,21 @@ impl Drop for EndpointDriver {
 
 #[derive(Debug)]
 pub(crate) struct EndpointInner {
-    pub(crate) state: Mutex<State>,
+    state: Mutex<State>,
     pub(crate) shared: Shared,
 }
 
 impl EndpointInner {
+    fn lock_state(&self) -> MutexGuard<'_, State> {
+        self.state.lock().expect("endpoint state mutex poisoned")
+    }
+
     pub(crate) fn accept(
         &self,
         incoming: proto::Incoming,
         server_config: Option<Arc<ServerConfig>>,
     ) -> Result<Connecting, ConnectionError> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.lock_state();
         let mut response_buffer = Vec::new();
         let now = state.runtime.now();
         match state
@@ -479,7 +473,7 @@ impl EndpointInner {
     }
 
     pub(crate) fn refuse(&self, incoming: proto::Incoming) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.lock_state();
         state.stats.refused_handshakes += 1;
         let mut response_buffer = Vec::new();
         let transmit = state.inner.refuse(incoming, &mut response_buffer);
@@ -487,7 +481,7 @@ impl EndpointInner {
     }
 
     pub(crate) fn retry(&self, incoming: proto::Incoming) -> Result<(), proto::RetryError> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.lock_state();
         let mut response_buffer = Vec::new();
         let transmit = state.inner.retry(incoming, &mut response_buffer)?;
         respond(transmit, &response_buffer, &mut state.sender);
@@ -495,7 +489,7 @@ impl EndpointInner {
     }
 
     pub(crate) fn ignore(&self, incoming: proto::Incoming) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.lock_state();
         state.stats.ignored_handshakes += 1;
         state.inner.ignore(incoming);
     }
@@ -716,7 +710,7 @@ impl Future for Accept<'_> {
     type Output = Option<Incoming>;
     fn poll(self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut this = self.project();
-        let mut endpoint = this.endpoint.inner.state.lock().unwrap();
+        let mut endpoint = this.endpoint.inner.lock_state();
         if endpoint.driver_lost {
             return Poll::Ready(None);
         }
@@ -792,7 +786,7 @@ impl Drop for EndpointRef {
             return;
         }
 
-        let endpoint = &mut *self.0.state.lock().unwrap();
+        let endpoint = &mut *self.0.lock_state();
         // If the driver is about to be on its own, ensure it can shut down if the last
         // connection is gone.
         if let Some(task) = endpoint.driver.take() {
