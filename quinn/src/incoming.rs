@@ -23,9 +23,19 @@ impl Incoming {
         Self(Some(State { inner, endpoint }))
     }
 
+    fn state(&self) -> &State {
+        self.0
+            .as_ref()
+            .expect("incoming connection already consumed")
+    }
+
+    fn take_state(&mut self) -> State {
+        self.0.take().expect("incoming connection already consumed")
+    }
+
     /// Attempt to accept this incoming connection (an error may still occur)
     pub fn accept(mut self) -> Result<Connecting, ConnectionError> {
-        let state = self.0.take().unwrap();
+        let state = self.take_state();
         state.endpoint.accept(state.inner, None)
     }
 
@@ -36,13 +46,13 @@ impl Incoming {
         mut self,
         server_config: Arc<ServerConfig>,
     ) -> Result<Connecting, ConnectionError> {
-        let state = self.0.take().unwrap();
+        let state = self.take_state();
         state.endpoint.accept(state.inner, Some(server_config))
     }
 
     /// Reject this incoming connection attempt
     pub fn refuse(mut self) {
-        let state = self.0.take().unwrap();
+        let state = self.take_state();
         state.endpoint.refuse(state.inner);
     }
 
@@ -50,7 +60,7 @@ impl Incoming {
     ///
     /// Errors if `may_retry()` is false.
     pub fn retry(mut self) -> Result<(), RetryError> {
-        let state = self.0.take().unwrap();
+        let state = self.take_state();
         state.endpoint.retry(state.inner).map_err(|e| {
             RetryError(Box::new(Self(Some(State {
                 inner: e.into_incoming(),
@@ -61,18 +71,18 @@ impl Incoming {
 
     /// Ignore this incoming connection attempt, not sending any packet in response
     pub fn ignore(mut self) {
-        let state = self.0.take().unwrap();
+        let state = self.take_state();
         state.endpoint.ignore(state.inner);
     }
 
     /// The local IP address which was used when the peer established the connection
     pub fn local_ip(&self) -> Option<IpAddr> {
-        self.0.as_ref().unwrap().inner.local_ip()
+        self.state().inner.local_ip()
     }
 
     /// The peer's UDP address
     pub fn remote_address(&self) -> SocketAddr {
-        self.0.as_ref().unwrap().inner.remote_address()
+        self.state().inner.remote_address()
     }
 
     /// Whether the socket address that is initiating this connection has been validated
@@ -83,7 +93,7 @@ impl Incoming {
     /// If `self.remote_address_validated()` is false, `self.may_retry()` is guaranteed to be true.
     /// The inverse is not guaranteed.
     pub fn remote_address_validated(&self) -> bool {
-        self.0.as_ref().unwrap().inner.remote_address_validated()
+        self.state().inner.remote_address_validated()
     }
 
     /// Whether it is legal to respond with a retry packet
@@ -91,12 +101,12 @@ impl Incoming {
     /// If `self.remote_address_validated()` is false, `self.may_retry()` is guaranteed to be true.
     /// The inverse is not guaranteed.
     pub fn may_retry(&self) -> bool {
-        self.0.as_ref().unwrap().inner.may_retry()
+        self.state().inner.may_retry()
     }
 
     /// The original destination CID when initiating the connection
     pub fn orig_dst_cid(&self) -> ConnectionId {
-        self.0.as_ref().unwrap().inner.orig_dst_cid()
+        self.state().inner.orig_dst_cid()
     }
 }
 
