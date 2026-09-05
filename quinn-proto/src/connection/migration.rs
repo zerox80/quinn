@@ -28,6 +28,8 @@ impl Connection {
         let prev_pto = self.pto(SpaceId::Data);
 
         let mut prev = mem::replace(&mut self.path, new_path);
+        self.events.push_back(Event::PathUpdated);
+
         // Don't clobber the original path if the previous one hasn't been validated yet
         if prev.challenge.is_none() {
             prev.challenge = Some(self.rng.random());

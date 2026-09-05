@@ -82,7 +82,6 @@ rcgen = { workspace = true }
 clap = { workspace = true }
 tokio = { workspace = true, features = ["fs", "io-util", "rt", "rt-multi-thread", "time", "macros", "test-util"] }
 tracing-subscriber = { workspace = true }
-tracing-futures = { workspace = true }
 tempfile = { workspace = true }
 url = { workspace = true }
 

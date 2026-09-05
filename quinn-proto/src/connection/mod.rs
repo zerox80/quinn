@@ -17,7 +17,6 @@ use crate::{
     Dir, Duration, EndpointConfig, Frame, INITIAL_MTU, Instant, MAX_CID_SIZE, MAX_STREAM_COUNT,
     MIN_INITIAL_SIZE, Side, StreamId, TIMER_GRANULARITY, TokenStore, Transmit, TransportError,
     TransportErrorCode, VarInt,
-    cid_generator::ConnectionIdGenerator,
     cid_queue::CidQueue,
     coding::BufMutExt,
     config::{ServerConfig, TransportConfig},
@@ -67,6 +66,7 @@ pub(crate) mod qlog;
 
 mod send_buffer;
 
+mod sent_packets;
 mod spaces;
 #[cfg(fuzzing)]
 pub use spaces::Retransmits;
@@ -212,6 +212,13 @@ pub struct Connection {
     permit_idle_reset: bool,
     /// Negotiated idle timeout
     idle_timeout: Option<Duration>,
+    /// The time we send next bundled ACK
+    ///
+    /// The goal is to wait long enough for the peer to acknowledge our previous
+    /// bundled ACK (see `next_bundled_ack_delay`).
+    /// A packet-count threshold would over- or under-shoot this depending on how fast we happen
+    /// to be sending, so a time threshold is used instead.
+    next_bundled_ack_time: Option<Instant>,
     timers: TimerTable,
     /// Number of packets received which could not be authenticated
     authentication_failures: u64,
@@ -284,7 +291,8 @@ impl Connection {
         remote: SocketAddr,
         local_ip: Option<IpAddr>,
         crypto: Box<dyn crypto::Session>,
-        cid_gen: &dyn ConnectionIdGenerator,
+        local_cid_len: usize,
+        local_cid_lifetime: Option<Duration>,
         now: Instant,
         version: u32,
         allow_mtud: bool,
@@ -311,8 +319,8 @@ impl Connection {
             handshake_cid: loc_cid,
             rem_handshake_cid: rem_cid,
             local_cid_state: CidState::new(
-                cid_gen.cid_len(),
-                cid_gen.cid_lifetime(),
+                local_cid_len,
+                local_cid_lifetime,
                 now,
                 if pref_addr_cid.is_some() { 2 } else { 1 },
             ),
@@ -368,6 +376,7 @@ impl Connection {
             ack_frequency: AckFrequencyState::new(get_max_ack_delay(
                 &TransportParameters::default(),
             )),
+            next_bundled_ack_time: None,
 
             pto_count: 0,
 
@@ -401,7 +410,6 @@ impl Connection {
         }
         this
     }
-
 }
 
 impl fmt::Debug for Connection {

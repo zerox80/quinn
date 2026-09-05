@@ -6,6 +6,11 @@ impl Connection {
         self.peer_params.min_ack_delay.is_some()
     }
 
+    #[cfg(test)]
+    pub(crate) fn disable_peer_ack_frequency(&mut self) {
+        self.peer_params.min_ack_delay = None;
+    }
+
     /// Send an IMMEDIATE_ACK frame to the remote endpoint
     ///
     /// According to the spec, this will result in an error if the remote endpoint does not support

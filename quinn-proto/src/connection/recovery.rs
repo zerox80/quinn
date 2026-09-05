@@ -17,7 +17,7 @@ impl Connection {
             let space = &mut self.spaces[space];
             if space.largest_acked_packet.is_none_or(|pn| ack.largest > pn) {
                 space.largest_acked_packet = Some(ack.largest);
-                if let Some(info) = space.sent_packets.get(&ack.largest) {
+                if let Some(info) = space.sent_packets.get(ack.largest) {
                     // This should always succeed, but a misbehaving peer might ACK a packet we
                     // haven't sent. At worst, that will result in us spuriously reducing the
                     // congestion window.
@@ -36,7 +36,7 @@ impl Connection {
         let mut newly_acked = ArrayRangeSet::new();
         for range in ack.iter() {
             self.packet_number_filter.check_ack(space, range.clone())?;
-            for (&pn, _) in self.spaces[space].sent_packets.range(range) {
+            for (pn, _) in self.spaces[space].sent_packets.range(range) {
                 newly_acked.insert_one(pn);
             }
         }
@@ -320,7 +320,7 @@ impl Connection {
         let space = &mut self.spaces[pn_space];
         space.loss_time = None;
 
-        for (&packet, info) in space.sent_packets.range(0..largest_acked_packet) {
+        for (packet, info) in space.sent_packets.range(0..largest_acked_packet) {
             let active_path_packet = info.path_generation == active_path;
             if prev_packet != Some(packet.wrapping_sub(1)) {
                 // An intervening packet was acknowledged

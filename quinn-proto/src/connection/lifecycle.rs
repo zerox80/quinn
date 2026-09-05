@@ -190,6 +190,7 @@ impl Connection {
                     if let Some((_, prev)) = self.prev_path.take() {
                         self.path = prev;
                         self.set_loss_detection_timer(now);
+                        self.events.push_back(Event::PathUpdated);
                     }
                     self.path.challenge = None;
                     self.path.challenge_pending = false;
@@ -255,7 +256,9 @@ impl Connection {
     pub fn stats(&self) -> ConnectionStats {
         let mut stats = self.stats;
         stats.path.rtt = self.path.rtt.get();
+        stats.path.min_rtt = self.path.rtt.min();
         stats.path.cwnd = self.path.congestion.window();
+        stats.path.bandwidth_estimate = self.path.congestion.metrics().bandwidth_estimate;
         stats.path.current_mtu = self.path.mtud.current_mtu();
 
         stats
@@ -365,6 +368,11 @@ impl Connection {
     /// Current best estimate of this connection's latency (round-trip-time)
     pub fn rtt(&self) -> Duration {
         self.path.rtt.get()
+    }
+
+    /// Minimum RTT seen on this path, ignoring ack delay
+    pub fn min_rtt(&self) -> Duration {
+        self.path.rtt.min()
     }
 
     /// Current state of this connection's congestion controller, for debugging purposes

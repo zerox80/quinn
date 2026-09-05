@@ -33,8 +33,8 @@ use tokio::{
     join,
     runtime::{Builder, Runtime},
 };
+use tracing::instrument::Instrument as _;
 use tracing::{error_span, info};
-use tracing_futures::Instrument as _;
 use tracing_subscriber::EnvFilter;
 
 use super::{ClientConfig, Endpoint, EndpointConfig, RecvStream, SendStream, TransportConfig};
@@ -756,6 +756,67 @@ async fn rebind_recv() {
     let mut stream = connection.accept_uni().await.unwrap();
     assert_eq!(stream.read_to_end(MSG.len()).await.unwrap(), MSG);
     server.await.unwrap();
+}
+
+#[tokio::test]
+async fn remote_address_monitoring() {
+    let _guard = subscribe();
+
+    let factory = EndpointFactory::new();
+    let server = factory.endpoint();
+    let server_addr = server.local_addr().unwrap();
+    let client = factory.endpoint();
+
+    let trigger_migration = Arc::new(tokio::sync::Notify::new());
+    let trigger_migration_clone = trigger_migration.clone();
+
+    let server_task = tokio::spawn(async move {
+        let conn = server.accept().await.unwrap().await.unwrap();
+        let old_remote = conn.remote_address();
+        let mut addr_watch = conn.watch_remote_address();
+
+        trigger_migration_clone.notify_one();
+
+        let addr_a = addr_watch.wait().await.unwrap();
+        assert_eq!(addr_a.port(), 23_001);
+        assert_ne!(old_remote, addr_a);
+
+        trigger_migration_clone.notify_one();
+
+        let addr_b = addr_watch.wait().await.unwrap();
+        assert_eq!(addr_b.port(), 23_003);
+        assert_ne!(addr_a, addr_b);
+    });
+
+    let client_conn = client
+        .connect(server_addr, "localhost")
+        .unwrap()
+        .await
+        .unwrap();
+
+    let mut port = 23_000;
+    let mut migrate = async || {
+        port += 1;
+        client
+            .rebind(
+                UdpSocket::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)).unwrap(),
+            )
+            .unwrap();
+
+        // send data from the new socket to trigger migration on the server
+        let mut stream = client_conn.open_uni().await.unwrap();
+        stream.write_all(b"hello").await.unwrap();
+        stream.finish().unwrap();
+    };
+
+    trigger_migration.notified().await;
+    migrate().await;
+    trigger_migration.notified().await;
+    migrate().await;
+    migrate().await;
+
+    server_task.await.unwrap();
+    client_conn.close(0u32.into(), b"done");
 }
 
 #[tokio::test]
