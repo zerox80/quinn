@@ -244,8 +244,8 @@ impl<'a> SendStream<'a> {
             .state
             .send
             .get_mut(&self.id)
-            .map(|opt| opt.get_or_insert_with(|| Send::new(max_send_data)))
-            .ok_or(WriteError::ClosedStream)?;
+            .ok_or(WriteError::ClosedStream)?
+            .get_or_insert_with(|| Send::new(max_send_data));
 
         if limit == 0 {
             trace!(
@@ -290,8 +290,8 @@ impl<'a> SendStream<'a> {
             .state
             .send
             .get_mut(&self.id)
-            .map(|opt| opt.get_or_insert_with(|| Send::new(max_send_data)))
-            .ok_or(FinishError::ClosedStream)?;
+            .ok_or(FinishError::ClosedStream)?
+            .get_or_insert_with(|| Send::new(max_send_data));
 
         let was_pending = stream.is_pending();
         stream.finish()?;
@@ -312,8 +312,8 @@ impl<'a> SendStream<'a> {
             .state
             .send
             .get_mut(&self.id)
-            .map(|opt| opt.get_or_insert_with(|| Send::new(max_send_data)))
-            .ok_or(ClosedStream { _private: () })?;
+            .ok_or(ClosedStream { _private: () })?
+            .get_or_insert_with(|| Send::new(max_send_data));
 
         if matches!(stream.state, SendState::ResetSent) {
             // Redundant reset call
@@ -341,8 +341,8 @@ impl<'a> SendStream<'a> {
             .state
             .send
             .get_mut(&self.id)
-            .map(|opt| opt.get_or_insert_with(|| Send::new(max_send_data)))
-            .ok_or(ClosedStream { _private: () })?;
+            .ok_or(ClosedStream { _private: () })?
+            .get_or_insert_with(|| Send::new(max_send_data));
 
         stream.priority = priority;
         Ok(())

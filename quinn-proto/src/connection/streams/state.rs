@@ -358,13 +358,10 @@ impl StreamsState {
     #[allow(unreachable_pub)] // fuzzing only
     pub fn received_stop_sending(&mut self, id: StreamId, error_code: VarInt) {
         let max_send_data = self.max_send_data(id);
-        let Some(stream) = self
-            .send
-            .get_mut(&id)
-            .map(|opt| opt.get_or_insert_with(|| Send::new(max_send_data)))
-        else {
+        let Some(stream_opt) = self.send.get_mut(&id) else {
             return;
         };
+        let stream = stream_opt.get_or_insert_with(|| Send::new(max_send_data));
 
         if stream.try_stop(error_code) {
             self.events
@@ -752,11 +749,8 @@ impl StreamsState {
 
         let write_limit = self.write_limit();
         let max_send_data = self.max_send_data(id);
-        if let Some(ss) = self
-            .send
-            .get_mut(&id)
-            .map(|opt| opt.get_or_insert_with(|| Send::new(max_send_data)))
-        {
+        if let Some(ss_opt) = self.send.get_mut(&id) {
+            let ss = ss_opt.get_or_insert_with(|| Send::new(max_send_data));
             if ss.increase_max_data(offset) {
                 if write_limit > 0 {
                     self.events.push_back(StreamEvent::Writable { id });
