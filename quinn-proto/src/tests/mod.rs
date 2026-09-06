@@ -1999,6 +1999,40 @@ fn deliver_to_server_from(pair: &mut Pair, remote: SocketAddr, packets: Vec<(Tra
 }
 
 #[test]
+fn path_changed_recovers_lost_stream() {
+    let _guard = subscribe();
+    let mut config = server_config();
+    let mut transport = TransportConfig::default();
+    transport.mtu_discovery_config(None);
+    config.transport = Arc::new(transport);
+    let mut pair = Pair::new(Default::default(), config);
+    let (client_ch, server_ch) = pair.connect();
+    pair.drive();
+
+    const MSG: &[u8] = b"must arrive";
+    let stream = pair.server_streams(server_ch).open(Dir::Uni).unwrap();
+    pair.server_send(server_ch, stream).write(MSG).unwrap();
+    pair.server_send(server_ch, stream).finish().unwrap();
+    pair.server.drive_outgoing(pair.time);
+    assert!(!pair.server.outbound.is_empty());
+    pair.server.outbound.clear();
+    assert!(pair.server_conn_mut(server_ch).bytes_in_flight() > 0);
+
+    let now = pair.time;
+    pair.server_conn_mut(server_ch).path_changed(now);
+    pair.drive();
+    assert_eq!(
+        pair.client_streams(client_ch).accept(Dir::Uni),
+        Some(stream)
+    );
+    let mut recv = pair.client_recv(client_ch, stream);
+    let mut chunks = recv.read(true).unwrap();
+    assert_eq!(chunks.next(usize::MAX).unwrap().unwrap().bytes, MSG);
+    assert_eq!(chunks.next(usize::MAX).unwrap(), None);
+    let _ = chunks.finalize();
+}
+
+#[test]
 fn path_changed_isolates_old_in_flight_packets() {
     let _guard = subscribe();
     let mut pair = Pair::default_with_deterministic_pns();

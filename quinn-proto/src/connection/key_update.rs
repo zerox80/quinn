@@ -1,7 +1,6 @@
 use super::*;
 
 impl Connection {
-
     pub(super) fn decrypt_packet(
         &mut self,
         now: Instant,
@@ -65,5 +64,4 @@ impl Connection {
         });
         self.key_phase = !self.key_phase;
     }
-
 }
