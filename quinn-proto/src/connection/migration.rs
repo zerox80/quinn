@@ -1,7 +1,6 @@
 use super::*;
 
 impl Connection {
-
     pub(super) fn migrate(&mut self, now: Instant, remote: SocketAddr) {
         trace!(%remote, "migration initiated");
         self.path_counter = self.path_counter.wrapping_add(1);
@@ -28,6 +27,7 @@ impl Connection {
         let prev_pto = self.pto(SpaceId::Data);
 
         let mut prev = mem::replace(&mut self.path, new_path);
+        self.drop_oversized_datagrams();
         self.events.push_back(Event::PathUpdated);
 
         // Don't clobber the original path if the previous one hasn't been validated yet
@@ -91,5 +91,4 @@ impl Connection {
         self.endpoint_events
             .push_back(EndpointEventInner::NeedIdentifiers(now, n));
     }
-
 }

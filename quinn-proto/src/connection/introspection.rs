@@ -1,7 +1,6 @@
 use super::*;
 
 impl Connection {
-
     pub(super) fn peer_supports_ack_frequency(&self) -> bool {
         self.peer_params.min_ack_delay.is_some()
     }
@@ -143,5 +142,4 @@ impl Connection {
     pub(crate) fn path_mtu(&self) -> u16 {
         self.path.current_mtu()
     }
-
 }

@@ -274,6 +274,7 @@ impl Endpoint {
         let addr = socket.local_addr()?;
         let mut inner = self.inner.lock_state();
         let old_socket = mem::replace(&mut inner.socket, socket);
+        inner.sender = inner.socket.create_sender();
         inner.prev_sockets.push_back(old_socket);
         while inner.prev_sockets.len() > MAX_PREV_SOCKETS {
             inner.prev_sockets.pop_front();

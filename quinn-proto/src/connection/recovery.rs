@@ -1,7 +1,6 @@
 use super::*;
 
 impl Connection {
-
     pub(super) fn on_ack_received(
         &mut self,
         now: Instant,
@@ -134,7 +133,12 @@ impl Connection {
         Ok(())
     }
 
-    pub(super) fn detect_spurious_loss(&mut self, ack: &frame::Ack, space: SpaceId, active_path: u64) -> bool {
+    pub(super) fn detect_spurious_loss(
+        &mut self,
+        ack: &frame::Ack,
+        space: SpaceId,
+        active_path: u64,
+    ) -> bool {
         let lost_packets = &mut self.spaces[space].lost_packets;
 
         if lost_packets.is_empty() {
@@ -293,7 +297,12 @@ impl Connection {
         self.set_loss_detection_timer(now);
     }
 
-    pub(super) fn detect_lost_packets(&mut self, now: Instant, pn_space: SpaceId, due_to_ack: bool) {
+    pub(super) fn detect_lost_packets(
+        &mut self,
+        now: Instant,
+        pn_space: SpaceId,
+        due_to_ack: bool,
+    ) {
         let mut lost_packets = Vec::<u64>::new();
         let mut lost_mtu_probe = None;
         let active_path = self.path.generation();
@@ -424,14 +433,7 @@ impl Connection {
                 self.path
                     .congestion
                     .on_mtu_update(self.path.mtud.current_mtu());
-                if let Some(max_datagram_size) = self.datagrams().max_size() {
-                    if self.datagrams.drop_oversized(max_datagram_size)
-                        && self.datagrams.send_blocked
-                    {
-                        self.datagrams.send_blocked = false;
-                        self.events.push_back(Event::DatagramsUnblocked);
-                    }
-                }
+                self.drop_oversized_datagrams();
             }
 
             // Don't apply a congestion penalty for lost ack-only packets. Only losses on the
@@ -573,5 +575,4 @@ impl Connection {
         };
         self.path.rtt.pto_base() + max_ack_delay
     }
-
 }

@@ -678,6 +678,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn pacing_adapts_to_reduced_bandwidth() {
+        let start = Instant::now();
+        let mut bbr = Bbr::new(Arc::new(BbrConfig::default()), 1200);
+        bbr.is_at_full_bandwidth = true;
+        bbr.pacing_gain = 1.0;
+        for round in 0..3 {
+            let sent = start + Duration::from_millis(round * 2);
+            bbr.max_bandwidth.on_sent(sent, 1200);
+            bbr.max_bandwidth
+                .on_ack(sent + Duration::from_millis(1), sent, 1200, round, false);
+        }
+        bbr.calculate_pacing_rate();
+        assert_eq!(bbr.pacing_rate, 600_000);
+
+        for round in 3..30 {
+            let sent = start + Duration::from_millis(4 + (round - 2) * 20);
+            bbr.max_bandwidth.on_sent(sent, 1200);
+            bbr.max_bandwidth
+                .on_ack(sent + Duration::from_millis(1), sent, 1200, round, false);
+        }
+        bbr.calculate_pacing_rate();
+        assert_eq!(bbr.pacing_rate, 60_000);
+    }
+
+    #[test]
     fn startup_does_not_grow_cwnd_above_target_window() {
         let now = Instant::now();
         let mut bbr = Bbr::new(Arc::new(BbrConfig::default()), 1200);

@@ -1,7 +1,6 @@
 use super::*;
 
 impl Connection {
-
     /// Returns the next time at which `handle_timeout` should be called
     ///
     /// The value returned may change after:
@@ -410,6 +409,9 @@ impl Connection {
         prev.challenge = None;
         prev.challenge_pending = false;
         self.prev_path = Some((self.rem_cids.active(), prev));
+        self.drop_oversized_datagrams();
+        // Bootstrap loss detection on the new path so old packets can still be recovered.
+        self.ping();
         self.set_loss_detection_timer(now);
     }
 
@@ -459,7 +461,10 @@ impl Connection {
     }
 
     /// Handle transport parameters received from the peer
-    pub(super) fn handle_peer_params(&mut self, params: TransportParameters) -> Result<(), TransportError> {
+    pub(super) fn handle_peer_params(
+        &mut self,
+        params: TransportParameters,
+    ) -> Result<(), TransportError> {
         if Some(self.orig_rem_cid) != params.initial_src_cid
             || (self.side.is_client()
                 && (Some(self.initial_dst_cid) != params.original_dst_cid
@@ -494,5 +499,4 @@ impl Connection {
             u16::try_from(self.peer_params.max_udp_payload_size.into_inner()).unwrap_or(u16::MAX),
         );
     }
-
 }

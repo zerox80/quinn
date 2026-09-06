@@ -1,7 +1,6 @@
 use super::*;
 
 impl Connection {
-
     /// Whether we have 1-RTT data to send
     ///
     /// See also `self.space(SpaceId::Data).can_send()`

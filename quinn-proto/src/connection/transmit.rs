@@ -1,7 +1,6 @@
 use super::*;
 
 impl Connection {
-
     /// Returns packets to transmit
     ///
     /// Connections should be polled for transmit after:
@@ -599,7 +598,11 @@ impl Connection {
     }
 
     /// Send PATH_CHALLENGE for a previous path if necessary
-    pub(super) fn send_path_challenge(&mut self, now: Instant, buf: &mut Vec<u8>) -> Option<Transmit> {
+    pub(super) fn send_path_challenge(
+        &mut self,
+        now: Instant,
+        buf: &mut Vec<u8>,
+    ) -> Option<Transmit> {
         let (prev_cid, prev_path) = self.prev_path.as_mut()?;
         if !prev_path.challenge_pending {
             return None;
@@ -657,7 +660,11 @@ impl Connection {
     }
 
     /// Indicate what types of frames are ready to send for the given space
-    pub(super) fn space_can_send(&self, space_id: SpaceId, frame_space_1rtt: usize) -> SendableFrames {
+    pub(super) fn space_can_send(
+        &self,
+        space_id: SpaceId,
+        frame_space_1rtt: usize,
+    ) -> SendableFrames {
         if self.spaces[space_id].crypto.is_none()
             && (space_id != SpaceId::Data
                 || self.zero_rtt_crypto.is_none()
@@ -1028,5 +1035,4 @@ impl Connection {
         sent.largest_acked = space.pending_acks.ranges().max();
         stats.frame_tx.acks += 1;
     }
-
 }

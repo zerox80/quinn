@@ -46,7 +46,10 @@ impl AckFrequencyState {
         config
             .max_ack_delay
             .unwrap_or(self.peer_max_ack_delay)
-            .clamp(min_ack_delay, rtt.max(MIN_AUTOMATIC_ACK_DELAY))
+            .clamp(
+                min_ack_delay,
+                rtt.max(MIN_AUTOMATIC_ACK_DELAY).max(min_ack_delay),
+            )
     }
 
     /// Returns the `max_ack_delay` for the purposes of calculating the PTO
@@ -153,3 +156,29 @@ const MAX_RTT_ERROR: f32 = 0.2;
 /// extension and an explicit max ACK delay is not configured.
 // Keep in sync with `AckFrequencyConfig::max_ack_delay` documentation
 const MIN_AUTOMATIC_ACK_DELAY: Duration = Duration::from_millis(25);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Side;
+
+    #[test]
+    fn peer_min_ack_delay_can_exceed_rtt() {
+        let params = TransportParameters {
+            min_ack_delay: Some(100_000u32.into()),
+            max_ack_delay: 100u32.into(),
+            ..TransportParameters::default()
+        };
+        let mut encoded = Vec::new();
+        params.write(&mut encoded);
+        let params = TransportParameters::read(Side::Client, &mut encoded.as_slice())
+            .expect("peer parameters must pass wire-level validation");
+        let state = AckFrequencyState::new(Duration::from_millis(100));
+        let delay = state.candidate_max_ack_delay(
+            Duration::from_millis(5),
+            &AckFrequencyConfig::default(),
+            &params,
+        );
+        assert_eq!(delay, Duration::from_millis(100));
+    }
+}

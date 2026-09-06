@@ -47,6 +47,73 @@ use wasm_bindgen_test::wasm_bindgen_test as test;
 // wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
 
 #[test]
+fn pending_incoming_survives_server_config_change() {
+    let _guard = subscribe();
+    let replacement = ServerConfig::with_crypto(Arc::new(server_crypto_with_alpn(vec![
+        "replacement-only".into(),
+    ])));
+    for replacement in [None, Some(Arc::new(replacement))] {
+        let mut pair = Pair::default();
+        let client_ch = pair.begin_connect(client_config());
+        pair.drive_client();
+        let (received, ecn, data) = pair.server.inbound.pop_front().unwrap();
+        let mut response = Vec::new();
+        let Some(DatagramEvent::NewConnection(incoming)) = pair.server.handle(
+            received,
+            pair.client.addr,
+            None,
+            ecn,
+            data.clone(),
+            &mut response,
+        ) else {
+            panic!("expected an incoming connection");
+        };
+
+        pair.server.set_server_config(replacement);
+        // Retransmitted Initials must still be buffered after the configuration changes.
+        assert!(
+            pair.server
+                .handle(received, pair.client.addr, None, ecn, data, &mut response)
+                .is_none()
+        );
+        let server_ch = pair.server.try_accept(incoming, pair.time).unwrap();
+        pair.drive();
+        for (endpoint, ch) in [(&mut pair.client, client_ch), (&mut pair.server, server_ch)] {
+            let conn = endpoint.connections.get_mut(&ch).unwrap();
+            assert!(
+                std::iter::from_fn(|| conn.poll()).any(|event| matches!(event, Event::Connected))
+            );
+        }
+    }
+}
+
+#[test]
+fn pending_incoming_can_retry_after_disabling_server() {
+    let _guard = subscribe();
+    let config = server_config();
+    let mut pair = Pair::new(Default::default(), config.clone());
+    pair.server.handle_incoming = Box::new(|_| IncomingConnectionBehavior::Wait);
+    let client_ch = pair.begin_connect(client_config());
+    pair.drive_client();
+    pair.server.drive_incoming(pair.time, pair.client.addr);
+    let incoming = pair.server.waiting_incoming.pop().unwrap();
+
+    pair.server.set_server_config(None);
+    pair.server.retry(incoming);
+    pair.server.set_server_config(Some(Arc::new(config)));
+    pair.server.handle_incoming = Box::new(|incoming| {
+        assert!(incoming.remote_address_validated());
+        IncomingConnectionBehavior::Accept
+    });
+    pair.drive();
+    pair.server.assert_accept();
+    assert!(
+        std::iter::from_fn(|| pair.client_conn_mut(client_ch).poll())
+            .any(|event| matches!(event, Event::Connected))
+    );
+}
+
+#[test]
 fn version_negotiate_server() {
     let _guard = subscribe();
     let client_addr = "[::2]:7890".parse().unwrap();
@@ -763,6 +830,8 @@ fn zero_rtt_rejection() {
     assert!(pair.client_conn_mut(client_ch).has_0rtt());
     let s = pair.client_streams(client_ch).open(Dir::Uni).unwrap();
     const MSG: &[u8] = b"Hello, 0-RTT!";
+    pair.client_conn_mut(client_ch)
+        .set_send_window(MSG.len() as u64);
     pair.client_send(client_ch, s).write(MSG).unwrap();
     pair.drive();
     assert!(!pair.client_conn_mut(client_ch).accepted_0rtt());
@@ -788,6 +857,19 @@ fn zero_rtt_rejection() {
     assert_eq!(chunks.next(usize::MAX), Err(ReadError::Blocked));
     let _ = chunks.finalize();
     assert_eq!(pair.client_conn_mut(client_ch).stats().path.lost_packets, 0);
+
+    // Rejecting early data must release the entire send window for 1-RTT traffic.
+    assert_eq!(
+        pair.client_send(client_ch, s2).write(MSG).unwrap(),
+        MSG.len()
+    );
+    pair.client_send(client_ch, s2).finish().unwrap();
+    pair.drive();
+    let mut recv = pair.server_recv(server_ch, s2);
+    let mut chunks = recv.read(false).unwrap();
+    assert_eq!(chunks.next(usize::MAX).unwrap().unwrap().bytes, MSG);
+    assert_eq!(chunks.next(usize::MAX).unwrap(), None);
+    let _ = chunks.finalize();
 }
 
 fn test_zero_rtt_incoming_limit<F: FnOnce(&mut ServerConfig)>(configure_server: F) {
@@ -1596,6 +1678,40 @@ fn deliver_to_server_incoming_from(
 fn deliver_to_server_from(pair: &mut Pair, remote: SocketAddr, packets: Vec<(Transmit, Bytes)>) {
     deliver_to_server_incoming_from(pair, remote, packets);
     pair.server.drive_outgoing(pair.time);
+}
+
+#[test]
+fn path_changed_recovers_lost_stream() {
+    let _guard = subscribe();
+    let mut config = server_config();
+    let mut transport = TransportConfig::default();
+    transport.mtu_discovery_config(None);
+    config.transport = Arc::new(transport);
+    let mut pair = Pair::new(Default::default(), config);
+    let (client_ch, server_ch) = pair.connect();
+    pair.drive();
+
+    const MSG: &[u8] = b"must arrive";
+    let stream = pair.server_streams(server_ch).open(Dir::Uni).unwrap();
+    pair.server_send(server_ch, stream).write(MSG).unwrap();
+    pair.server_send(server_ch, stream).finish().unwrap();
+    pair.server.drive_outgoing(pair.time);
+    assert!(!pair.server.outbound.is_empty());
+    pair.server.outbound.clear();
+    assert!(pair.server_conn_mut(server_ch).bytes_in_flight() > 0);
+
+    let now = pair.time;
+    pair.server_conn_mut(server_ch).path_changed(now);
+    pair.drive();
+    assert_eq!(
+        pair.client_streams(client_ch).accept(Dir::Uni),
+        Some(stream)
+    );
+    let mut recv = pair.client_recv(client_ch, stream);
+    let mut chunks = recv.read(true).unwrap();
+    assert_eq!(chunks.next(usize::MAX).unwrap().unwrap().bytes, MSG);
+    assert_eq!(chunks.next(usize::MAX).unwrap(), None);
+    let _ = chunks.finalize();
 }
 
 #[test]
@@ -4047,6 +4163,65 @@ fn ack_bundled_with_datagrams() {
         pair.server_conn_mut(server_ch).stats().frame_tx.acks,
         "server should not sent ACK frames"
     );
+}
+
+/// Path changes must discard oversized datagrams and wake blocked senders.
+#[test]
+fn path_changes_unblock_oversized_datagrams() {
+    let _guard = subscribe();
+    for migrate in [false, true] {
+        let mut pair = Pair::default();
+        let (client_ch, server_ch) = pair.connect();
+        pair.drive();
+        let old_max = pair.server_datagrams(server_ch).max_size().unwrap();
+        assert!(old_max > 1200);
+        let empty_space = pair.server_datagrams(server_ch).send_buffer_space();
+        let data = Bytes::from(vec![42; old_max]);
+        loop {
+            match pair.server_datagrams(server_ch).send(data.clone(), false) {
+                Ok(()) => {}
+                Err(SendDatagramError::Blocked(_)) => break,
+                Err(error) => panic!("unexpected send error: {error}"),
+            }
+        }
+        while pair.server_conn_mut(server_ch).poll().is_some() {}
+
+        pair.mtu = 1200;
+        if migrate {
+            pair.client
+                .addr
+                .set_port(CLIENT_PORTS.lock().unwrap().next().unwrap());
+            pair.client_conn_mut(client_ch).ping();
+            pair.drive_client();
+            pair.server.drive_incoming(pair.time, pair.client.addr);
+            pair.server.drive_conn_events();
+            assert_eq!(
+                pair.server_conn_mut(server_ch).remote_address(),
+                pair.client.addr
+            );
+        } else {
+            let now = pair.time;
+            pair.server_conn_mut(server_ch).path_changed(now);
+        }
+
+        assert!(pair.server_datagrams(server_ch).max_size().unwrap() < old_max);
+        assert_eq!(
+            pair.server_datagrams(server_ch).send_buffer_space(),
+            empty_space
+        );
+        assert!(
+            std::iter::from_fn(|| pair.server_conn_mut(server_ch).poll())
+                .any(|event| matches!(event, Event::DatagramsUnblocked))
+        );
+
+        let small = Bytes::from_static(b"small");
+        pair.server_datagrams(server_ch)
+            .send(small.clone(), false)
+            .unwrap();
+        pair.drive();
+        assert_eq!(pair.client_datagrams(client_ch).recv(), Some(small));
+        assert_eq!(pair.client_datagrams(client_ch).recv(), None);
+    }
 }
 
 /// Verify that dropping oversized datagrams will trigger a DatagramsUnblocked event.

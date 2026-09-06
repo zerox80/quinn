@@ -1,7 +1,6 @@
 use super::*;
 
 impl Connection {
-
     pub(super) fn on_packet_authenticated(
         &mut self,
         now: Instant,
@@ -554,7 +553,10 @@ impl Connection {
         true
     }
 
-    pub(super) fn process_buffered_handshake_1rtt(&mut self, now: Instant) -> Result<(), TransportError> {
+    pub(super) fn process_buffered_handshake_1rtt(
+        &mut self,
+        now: Instant,
+    ) -> Result<(), TransportError> {
         while let Some(buffered) = self.buffered_handshake_1rtt.pop_front() {
             if self.state.is_closed() {
                 break;
@@ -1211,5 +1213,4 @@ impl Connection {
 
         Ok(())
     }
-
 }

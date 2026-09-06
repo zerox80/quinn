@@ -2,11 +2,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 
-use crate::{
-    Side, TokenStore,
-    config::ServerConfig,
-    shared::ConnectionId,
-};
+use crate::{Side, TokenStore, config::ServerConfig, shared::ConnectionId};
 
 /// Fields of `Connection` specific to it being client-side or server-side
 pub(super) enum ConnectionSide {
