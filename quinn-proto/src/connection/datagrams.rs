@@ -10,6 +10,18 @@ use crate::{
     frame::{Datagram, FrameStruct},
 };
 
+impl Connection {
+    /// Discard queued datagrams that no longer fit the active path, waking blocked senders.
+    pub(super) fn drop_oversized_datagrams(&mut self) {
+        if let Some(max_datagram_size) = self.datagrams().max_size() {
+            if self.datagrams.drop_oversized(max_datagram_size) && self.datagrams.send_blocked {
+                self.datagrams.send_blocked = false;
+                self.events.push_back(Event::DatagramsUnblocked);
+            }
+        }
+    }
+}
+
 /// API to control datagram traffic
 pub struct Datagrams<'a> {
     pub(super) conn: &'a mut Connection,

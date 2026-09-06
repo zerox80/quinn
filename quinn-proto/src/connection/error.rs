@@ -28,8 +28,8 @@ pub enum ConnectionError {
     /// Communication with the peer has lapsed for longer than the negotiated idle timeout
     ///
     /// If neither side is sending keep-alives, a connection will time out after a long enough idle
-    /// period even if the peer is still reachable. See also [`TransportConfig::max_idle_timeout()`]
-    /// and [`TransportConfig::keep_alive_interval()`].
+    /// period even if the peer is still reachable. See also [`crate::TransportConfig::max_idle_timeout()`]
+    /// and [`crate::TransportConfig::keep_alive_interval()`].
     #[error("timed out")]
     TimedOut,
     /// The local application closed the connection

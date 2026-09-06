@@ -15,11 +15,11 @@ use tracing::{debug, error, trace, trace_span, warn};
 
 use crate::{
     Dir, Duration, EndpointConfig, Frame, INITIAL_MTU, Instant, MAX_CID_SIZE, MAX_STREAM_COUNT,
-    MIN_INITIAL_SIZE, Side, StreamId, TIMER_GRANULARITY, TokenStore, Transmit, TransportError,
+    MIN_INITIAL_SIZE, Side, StreamId, TIMER_GRANULARITY, Transmit, TransportError,
     TransportErrorCode, VarInt,
     cid_queue::CidQueue,
     coding::BufMutExt,
-    config::{ServerConfig, TransportConfig},
+    config::TransportConfig,
     connection::spaces::LostPacket,
     crypto::{self, KeyPair, Keys, PacketKey},
     frame::{self, Close, Datagram, FrameStruct, NewConnectionId, NewToken},
@@ -102,7 +102,10 @@ use side::ConnectionSide;
 pub(crate) use side::SideArgs;
 
 mod state;
+#[cfg(fuzzing)]
 pub use state::State;
+#[cfg(not(fuzzing))]
+pub(crate) use state::State;
 
 mod helpers;
 mod introspection;
