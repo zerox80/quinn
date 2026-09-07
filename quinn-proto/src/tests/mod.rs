@@ -3760,6 +3760,64 @@ fn ack_bundled_with_datagrams() {
     );
 }
 
+#[test]
+fn path_changes_unblock_oversized_datagrams() {
+    let _guard = subscribe();
+    for migrate in [false, true] {
+        let mut pair = Pair::default();
+        let (client_ch, server_ch) = pair.connect();
+        pair.drive();
+        let old_max = pair.server_datagrams(server_ch).max_size().unwrap();
+        assert!(old_max > 1200);
+        let empty_space = pair.server_datagrams(server_ch).send_buffer_space();
+        let data = Bytes::from(vec![42; old_max]);
+        loop {
+            match pair.server_datagrams(server_ch).send(data.clone(), false) {
+                Ok(()) => {}
+                Err(SendDatagramError::Blocked(_)) => break,
+                Err(error) => panic!("unexpected send error: {error}"),
+            }
+        }
+        while pair.server_conn_mut(server_ch).poll().is_some() {}
+
+        pair.mtu = 1200;
+        if migrate {
+            pair.client
+                .addr
+                .set_port(CLIENT_PORTS.lock().unwrap().next().unwrap());
+            pair.client_conn_mut(client_ch).ping();
+            pair.drive_client();
+            pair.server.drive_incoming(pair.time, pair.client.addr);
+            pair.server.drive_conn_events();
+            assert_eq!(
+                pair.server_conn_mut(server_ch).remote_address(),
+                pair.client.addr
+            );
+        } else {
+            let now = pair.time;
+            pair.server_conn_mut(server_ch).path_changed(now);
+        }
+
+        assert!(pair.server_datagrams(server_ch).max_size().unwrap() < old_max);
+        assert_eq!(
+            pair.server_datagrams(server_ch).send_buffer_space(),
+            empty_space
+        );
+        assert!(
+            std::iter::from_fn(|| pair.server_conn_mut(server_ch).poll())
+                .any(|event| matches!(event, Event::DatagramsUnblocked))
+        );
+
+        let small = Bytes::from_static(b"small");
+        pair.server_datagrams(server_ch)
+            .send(small.clone(), false)
+            .unwrap();
+        pair.drive();
+        assert_eq!(pair.client_datagrams(client_ch).recv(), Some(small));
+        assert_eq!(pair.client_datagrams(client_ch).recv(), None);
+    }
+}
+
 /// Verify that dropping oversized datagrams will trigger a DatagramsUnblocked event.
 #[test]
 fn oversized_datagrams_trigger_unblock() {

@@ -1453,6 +1453,7 @@ impl Connection {
     /// configuration in the [`TransportConfig`].
     pub fn path_changed(&mut self, now: Instant) {
         self.path.reset(now, &self.config);
+        self.drop_oversized_datagrams();
     }
 
     /// Modify the number of remotely initiated streams that may be concurrently open
@@ -3166,6 +3167,7 @@ impl Connection {
         let prev_pto = self.pto(SpaceId::Data);
 
         let mut prev = mem::replace(&mut self.path, new_path);
+        self.drop_oversized_datagrams();
         self.events.push_back(Event::PathUpdated);
 
         // Don't clobber the original path if the previous one hasn't been validated yet
