@@ -1,68 +1,351 @@
-use std::collections::BTreeMap;
-use std::ops::RangeBounds;
-
 use super::spaces::SentPacket;
+use std::{
+    collections::{BTreeMap, VecDeque},
+    ops::{Bound, RangeBounds},
+};
 
-/// A sparse map from packet number to [`SentPacket`].
-///
-/// Storage must depend on the number of tracked packets, not the distance between
-/// packet numbers: an old unacknowledged packet can outlive many removed entries.
+// Cleanup never scans the whole packet window. Each compaction is limited to
+// one block; edge promotion can convert one additional block. The directory
+// moves block descriptors, never all packets, when a block becomes empty.
+const BLOCK_SIZE: usize = 64;
+type Bounds = (Bound<u64>, Bound<u64>);
+
 #[derive(Default)]
-pub(super) struct SentPackets {
-    packets: BTreeMap<u64, SentPacket>,
-    /// Count of present entries with `size != 0`, for O(1) `has_in_flight`.
-    in_flight: usize,
+struct Block {
+    slots: VecDeque<(u64, Option<SentPacket>)>,
+    live: usize,
 }
 
+impl Block {
+    fn is_empty(&self) -> bool {
+        self.live == 0
+    }
+    fn first(&self) -> u64 {
+        self.slots.front().unwrap().0
+    }
+    fn last(&self) -> u64 {
+        self.slots.back().unwrap().0
+    }
+    fn make_room(&mut self) -> bool {
+        if self.slots.len() == BLOCK_SIZE && self.live < BLOCK_SIZE {
+            self.slots.retain(|(_, p)| p.is_some());
+        }
+        self.slots.len() < BLOCK_SIZE
+    }
+    fn insert(&mut self, pn: u64, packet: SentPacket) {
+        debug_assert!(self.slots.len() < BLOCK_SIZE);
+        debug_assert!(self.is_empty() || self.last() < pn);
+        self.slots.push_back((pn, Some(packet)));
+        self.live += 1;
+    }
+    fn lower_bound(&self, pn: u64) -> usize {
+        if self.is_empty() || pn <= self.first() {
+            return 0;
+        }
+        if pn > self.last() {
+            return self.slots.len();
+        }
+        if let Ok(i) = usize::try_from(pn - self.first())
+            && self.slots.get(i).is_some_and(|(key, _)| *key == pn)
+        {
+            return i;
+        }
+        self.slots.partition_point(|(key, _)| *key < pn)
+    }
+    fn get(&self, pn: u64) -> Option<&SentPacket> {
+        let (key, p) = self.slots.get(self.lower_bound(pn))?;
+        if *key != pn {
+            return None;
+        }
+        p.as_ref()
+    }
+    #[inline]
+    fn first_after(&self, pn: u64) -> Option<(u64, &SentPacket)> {
+        self.slots
+            .range(self.lower_bound(pn)..)
+            .find_map(|(key, p)| p.as_ref().filter(|_| *key > pn).map(|p| (*key, p)))
+    }
+    fn remove(&mut self, pn: u64) -> Option<SentPacket> {
+        let i = self.lower_bound(pn);
+        let (key, p) = self.slots.get_mut(i)?;
+        if *key != pn {
+            return None;
+        }
+        let p = p.take()?;
+        self.live -= 1;
+        while self.slots.front().is_some_and(|(_, p)| p.is_none()) {
+            self.slots.pop_front();
+        }
+        while self.slots.back().is_some_and(|(_, p)| p.is_none()) {
+            self.slots.pop_back();
+        }
+        if self.slots.len() > 4.max(self.live * 2) {
+            self.slots.retain(|(_, p)| p.is_some());
+        }
+        if self.slots.capacity() > (self.live * 2).max(2).next_power_of_two() {
+            self.slots
+                .shrink_to(self.slots.len().max(2).next_power_of_two());
+        }
+        Some(p)
+    }
+    fn range(&self, bounds: Bounds) -> impl Iterator<Item = (u64, &SentPacket)> {
+        let after = |pn: u64| {
+            pn.checked_add(1)
+                .map_or(self.slots.len(), |pn| self.lower_bound(pn))
+        };
+        let start = match bounds.0 {
+            Bound::Unbounded => 0,
+            Bound::Included(pn) => self.lower_bound(pn),
+            Bound::Excluded(pn) => after(pn),
+        };
+        let end = match bounds.1 {
+            Bound::Unbounded => self.slots.len(),
+            Bound::Included(pn) => after(pn),
+            Bound::Excluded(pn) => self.lower_bound(pn),
+        };
+        self.slots
+            .range(start..start.max(end))
+            .filter_map(|(pn, p)| p.as_ref().map(|p| (*pn, p)))
+    }
+    fn values_mut(&mut self) -> impl Iterator<Item = &mut SentPacket> {
+        self.slots.iter_mut().filter_map(|(_, p)| p.as_mut())
+    }
+    fn into_values(self) -> impl Iterator<Item = SentPacket> {
+        self.slots.into_iter().filter_map(|(_, p)| p)
+    }
+}
+
+// Intermediate blocks never append. A boxed slice avoids VecDeque's spare
+// capacity and keeps the directory descriptor smaller. All work stays <=64 slots.
+#[derive(Default)]
+struct FrozenBlock {
+    slots: Box<[(u64, Option<SentPacket>)]>,
+    live: usize,
+}
+impl FrozenBlock {
+    fn first_after(&self, pn: u64) -> Option<(u64, &SentPacket)> {
+        self.slots[self.lower_bound(pn)..]
+            .iter()
+            .find_map(|(key, p)| p.as_ref().filter(|_| *key > pn).map(|p| (*key, p)))
+    }
+    fn from_block(block: Block) -> Self {
+        Self {
+            slots: Vec::from(block.slots).into_boxed_slice(),
+            live: block.live,
+        }
+    }
+    fn into_block(self) -> Block {
+        let mut slots = VecDeque::from(self.slots.into_vec());
+        // Preserve power-of-two capacity when a promoted head can append again.
+        let capacity = slots.len().max(2).next_power_of_two();
+        slots.reserve_exact(capacity - slots.len());
+        Block {
+            slots,
+            live: self.live,
+        }
+    }
+    fn is_empty(&self) -> bool {
+        self.live == 0
+    }
+    fn first(&self) -> u64 {
+        self.slots[0].0
+    }
+    fn lower_bound(&self, pn: u64) -> usize {
+        if self.slots.is_empty() || pn <= self.slots[0].0 {
+            return 0;
+        }
+        if pn > self.slots.last().unwrap().0 {
+            return self.slots.len();
+        }
+        if let Ok(i) = usize::try_from(pn - self.slots[0].0)
+            && self.slots.get(i).is_some_and(|(key, _)| *key == pn)
+        {
+            return i;
+        }
+        self.slots.partition_point(|(key, _)| *key < pn)
+    }
+    fn get(&self, pn: u64) -> Option<&SentPacket> {
+        let (key, p) = self.slots.get(self.lower_bound(pn))?;
+        if *key != pn {
+            return None;
+        }
+        p.as_ref()
+    }
+    fn remove(&mut self, pn: u64) -> Option<SentPacket> {
+        let i = self.lower_bound(pn);
+        let (key, p) = self.slots.get_mut(i)?;
+        if *key != pn {
+            return None;
+        }
+        let p = p.take()?;
+        self.live -= 1;
+        if self.live != 0 && self.slots.len() >= self.live * 2 {
+            let mut slots = std::mem::take(&mut self.slots).into_vec();
+            slots.retain(|(_, p)| p.is_some());
+            self.slots = slots.into_boxed_slice();
+        }
+        Some(p)
+    }
+    fn range(&self, bounds: Bounds) -> impl Iterator<Item = (u64, &SentPacket)> {
+        let after = |pn: u64| {
+            pn.checked_add(1)
+                .map_or(self.slots.len(), |pn| self.lower_bound(pn))
+        };
+        let start = match bounds.0 {
+            Bound::Unbounded => 0,
+            Bound::Included(pn) => self.lower_bound(pn),
+            Bound::Excluded(pn) => after(pn),
+        };
+        let end = match bounds.1 {
+            Bound::Unbounded => self.slots.len(),
+            Bound::Included(pn) => after(pn),
+            Bound::Excluded(pn) => self.lower_bound(pn),
+        };
+        self.slots[start..start.max(end)]
+            .iter()
+            .filter_map(|(pn, p)| p.as_ref().map(|p| (*pn, p)))
+    }
+    fn values_mut(&mut self) -> impl Iterator<Item = &mut SentPacket> {
+        self.slots.iter_mut().filter_map(|(_, p)| p.as_mut())
+    }
+    fn into_values(self) -> impl Iterator<Item = SentPacket> {
+        self.slots.into_vec().into_iter().filter_map(|(_, p)| p)
+    }
+}
+
+/// A bounded-block queue with direct access to its oldest and newest blocks.
+/// Interior blocks are indexed by their original lower packet-number fence.
+#[derive(Default)]
+pub(super) struct SentPackets {
+    head: Block,
+    middle: BTreeMap<u64, FrozenBlock>,
+    tail: Block,
+    in_flight: usize,
+}
 impl SentPackets {
-    /// Insert `value` at `pn`, which must exceed every previously inserted packet number.
-    pub(super) fn insert(&mut self, pn: u64, value: SentPacket) {
-        debug_assert!(
-            self.packets
-                .last_key_value()
-                .is_none_or(|(&last, _)| pn > last)
-        );
-        if value.size != 0 {
-            self.in_flight += 1;
+    pub(super) fn insert(&mut self, pn: u64, packet: SentPacket) {
+        self.in_flight += usize::from(packet.size != 0);
+        if self.head.is_empty()
+            || (self.middle.is_empty() && self.tail.is_empty() && self.head.make_room())
+        {
+            self.head.insert(pn, packet);
+        } else {
+            if !self.tail.make_room() {
+                let block = FrozenBlock::from_block(std::mem::take(&mut self.tail));
+                self.middle.insert(block.first(), block);
+            }
+            self.tail.insert(pn, packet);
         }
-        self.packets.insert(pn, value);
     }
-
-    /// Remove and return the entry for `pn`.
-    pub(super) fn remove(&mut self, pn: u64) -> Option<SentPacket> {
-        let value = self.packets.remove(&pn)?;
-        if value.size != 0 {
-            self.in_flight -= 1;
-        }
-        Some(value)
-    }
-
-    /// Return the entry for `pn`.
     pub(super) fn get(&self, pn: u64) -> Option<&SentPacket> {
-        self.packets.get(&pn)
+        if self.head.is_empty() {
+            return None;
+        }
+        if pn <= self.head.last() {
+            return self.head.get(pn);
+        }
+        if !self.tail.is_empty() && pn >= self.tail.first() {
+            return self.tail.get(pn);
+        }
+        self.middle.range(..=pn).next_back()?.1.get(pn)
     }
-
-    /// Whether any present entry has `size != 0`.
+    pub(super) fn remove(&mut self, pn: u64) -> Option<SentPacket> {
+        if self.head.is_empty() {
+            return None;
+        }
+        let packet = if pn <= self.head.last() {
+            self.head.remove(pn)
+        } else if !self.tail.is_empty() && pn >= self.tail.first() {
+            self.tail.remove(pn)
+        } else {
+            let (&key, block) = self.middle.range_mut(..=pn).next_back()?;
+            let packet = block.remove(pn);
+            if block.is_empty() {
+                self.middle.remove(&key);
+            }
+            packet
+        }?;
+        self.in_flight -= usize::from(packet.size != 0);
+        if self.head.is_empty() {
+            self.head = self
+                .middle
+                .pop_first()
+                .map_or_else(|| std::mem::take(&mut self.tail), |(_, b)| b.into_block());
+        }
+        Some(packet)
+    }
     pub(super) fn has_in_flight(&self) -> bool {
         self.in_flight != 0
     }
-
-    /// Iterate present entries in `range`, in increasing packet-number order.
+    /// Find the first live packet strictly after `pn` without constructing a
+    /// general range iterator spanning all three storage regions.
+    #[inline]
+    pub(super) fn first_after(&self, pn: u64) -> Option<(u64, &SentPacket)> {
+        self.head
+            .first_after(pn)
+            .or_else(|| self.first_after_head(pn))
+    }
+    fn first_after_head(&self, pn: u64) -> Option<(u64, &SentPacket)> {
+        if !self.tail.is_empty() && pn >= self.tail.first() {
+            return self.tail.first_after(pn);
+        }
+        // Most interior hits need only the containing block. Only search for
+        // a later block when that block has no live successor.
+        if let Some((_, block)) = self.middle.range(..=pn).next_back()
+            && let Some(packet) = block.first_after(pn)
+        {
+            return Some(packet);
+        }
+        self.middle
+            .range((Bound::Excluded(pn), Bound::Unbounded))
+            .next()
+            .and_then(|(_, block)| block.first_after(pn))
+            .or_else(|| self.tail.first_after(pn))
+    }
     pub(super) fn range(
         &self,
         range: impl RangeBounds<u64>,
-    ) -> impl Iterator<Item = (u64, &SentPacket)> + '_ {
-        self.packets.range(range).map(|(&pn, packet)| (pn, packet))
+    ) -> impl Iterator<Item = (u64, &SentPacket)> {
+        let bounds = (range.start_bound().cloned(), range.end_bound().cloned());
+        let lower = match bounds.0 {
+            Bound::Unbounded => 0,
+            Bound::Included(n) | Bound::Excluded(n) => n,
+        };
+        let start = self
+            .middle
+            .range(..=lower)
+            .next_back()
+            .map_or(lower, |(&n, _)| n);
+        let end = match bounds.1 {
+            Bound::Unbounded => u64::MAX,
+            Bound::Included(n) | Bound::Excluded(n) => n,
+        };
+        self.head
+            .range(bounds)
+            .chain(
+                self.middle
+                    .range(start..=start.max(end))
+                    .flat_map(move |(_, b)| b.range(bounds)),
+            )
+            .chain(self.tail.range(bounds))
     }
-
-    /// Mutably iterate present entries in increasing packet-number order.
-    pub(super) fn values_mut(&mut self) -> impl Iterator<Item = &mut SentPacket> + '_ {
-        self.packets.values_mut()
+    pub(super) fn values_mut(&mut self) -> impl Iterator<Item = &mut SentPacket> {
+        self.head
+            .values_mut()
+            .chain(self.middle.values_mut().flat_map(FrozenBlock::values_mut))
+            .chain(self.tail.values_mut())
     }
-
-    /// Consume the map, yielding present entries in increasing packet-number order.
     pub(super) fn into_values(self) -> impl Iterator<Item = SentPacket> {
-        self.packets.into_values()
+        self.head
+            .into_values()
+            .chain(self.middle.into_values().flat_map(FrozenBlock::into_values))
+            .chain(self.tail.into_values())
+    }
+    #[cfg(test)]
+    fn capacity_slots(&self) -> usize {
+        self.head.slots.capacity()
+            + self.tail.slots.capacity()
+            + self.middle.values().map(|b| b.slots.len()).sum::<usize>()
     }
 }
 
@@ -81,7 +364,7 @@ mod tests {
             packets.remove(pn);
         }
         assert_eq!(packets.range(..).count(), 1);
-        assert!(packets.packets.len() == 1);
+        assert!(packets.capacity_slots() <= 8);
         assert!(packets.has_in_flight());
         assert_eq!(packets.get(0).unwrap().size, 1200);
     }
@@ -219,6 +502,186 @@ mod tests {
         assert!(!m.has_in_flight()); // only size-0 remains
         m.remove(0);
         assert!(!m.has_in_flight());
+    }
+
+    #[test]
+    fn extreme_packet_number_gap() {
+        let mut m = SentPackets::default();
+        let last = (1u64 << 62) - 1;
+        m.insert(0, packet(1200));
+        m.insert(last, packet(0));
+        assert_eq!(m.range(1..).next().unwrap().0, last);
+        assert!(m.get(last - 1).is_none());
+        assert!(m.remove(last).is_some());
+        assert_eq!(m.range(..).count(), 1);
+        assert!(m.has_in_flight());
+    }
+
+    #[test]
+    fn allocation_follows_live_window_after_burst() {
+        let mut m = SentPackets::default();
+        for n in 0..16384 {
+            m.insert(n, packet(1200));
+        }
+        // Keep the oldest packet and delete a large suffix.
+        for n in (1..16384).rev() {
+            m.remove(n);
+            assert!(m.capacity_slots() <= 512.max(n as usize * 8));
+        }
+        assert_eq!(m.range(..).count(), 1);
+        assert!(m.capacity_slots() <= 256);
+        for n in 16384..20000 {
+            m.insert(n, packet(0));
+            m.remove(n);
+            assert!(m.range(..).count() <= 128);
+            assert!(m.capacity_slots() <= 256);
+        }
+    }
+
+    #[test]
+    fn fragmented_blocks_match_reference() {
+        use std::collections::BTreeMap;
+        for seed in 1..=4u64 {
+            let mut m = SentPackets::default();
+            let mut reference = BTreeMap::new();
+            for pn in 0..4096 {
+                m.insert(pn, packet(1200));
+                reference.insert(pn, 1200);
+            }
+            let mut state = seed * 2858;
+            let mut next = 4096;
+            for step in 0..8192 {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                if state.is_multiple_of(3) || reference.is_empty() {
+                    next += 1 + (state >> 8) % 7;
+                    let size = if state & 16 == 0 { 0 } else { 1200 };
+                    m.insert(next, packet(size));
+                    reference.insert(next, size);
+                } else {
+                    let pn = *reference
+                        .keys()
+                        .nth(state as usize % reference.len())
+                        .unwrap();
+                    assert_eq!(m.remove(pn).map(|p| p.size), reference.remove(&pn));
+                }
+                for block in std::iter::once(&m.head).chain(std::iter::once(&m.tail)) {
+                    assert!(block.slots.len() <= BLOCK_SIZE);
+                    assert!(block.slots.capacity() <= BLOCK_SIZE);
+                    assert_eq!(
+                        block.live,
+                        block.slots.iter().filter(|(_, p)| p.is_some()).count()
+                    );
+                }
+                for block in m.middle.values() {
+                    assert!(block.slots.len() <= BLOCK_SIZE);
+                    assert_eq!(
+                        block.live,
+                        block.slots.iter().filter(|(_, p)| p.is_some()).count()
+                    );
+                }
+                assert!(m.middle.values().all(|b| !b.is_empty()));
+                assert!(!m.head.is_empty() || (m.middle.is_empty() && m.tail.is_empty()));
+                assert_eq!(m.has_in_flight(), reference.values().any(|&size| size != 0));
+                if step % 97 == 0 {
+                    assert_eq!(
+                        range_of(&m, ..),
+                        reference.iter().map(|(&k, &v)| (k, v)).collect::<Vec<_>>()
+                    );
+                    let lower = state % (next + 1);
+                    let upper = lower + state % 1000;
+                    assert_eq!(
+                        range_of(&m, lower..=upper),
+                        reference
+                            .range(lower..=upper)
+                            .map(|(&k, &v)| (k, v))
+                            .collect::<Vec<_>>()
+                    );
+                    assert!(
+                        m.range((Bound::Excluded(u64::MAX), Bound::Unbounded))
+                            .next()
+                            .is_none()
+                    );
+                }
+            }
+            for (pn, size) in reference {
+                assert_eq!(m.remove(pn).map(|p| p.size), Some(size));
+            }
+            assert!(m.head.is_empty() && m.middle.is_empty() && m.tail.is_empty());
+        }
+    }
+
+    #[test]
+    fn one_live_packet_per_block_releases_capacity() {
+        let mut m = SentPackets::default();
+        for pn in 0..65536 {
+            m.insert(pn, packet(1200));
+        }
+        for pn in 0..65536 {
+            if pn % 64 != 31 {
+                m.remove(pn);
+            }
+        }
+        assert_eq!(m.range(..).count(), 1024);
+        assert!(m.capacity_slots() <= 1028);
+        for pn in (31..65536).step_by(64) {
+            assert_eq!(m.get(pn).unwrap().size, 1200);
+        }
+    }
+
+    #[test]
+    fn frozen_block_compacts_at_half_occupancy() {
+        let mut m = SentPackets::default();
+        for pn in 0..1024 {
+            m.insert(pn, packet(1200));
+        }
+        for pn in 513..544 {
+            m.remove(pn);
+        }
+        assert_eq!(m.middle.get(&512).unwrap().slots.len(), 64);
+        assert_eq!(m.middle.get(&512).unwrap().live, 33);
+        m.remove(544);
+        assert_eq!(m.middle.get(&512).unwrap().slots.len(), 32);
+        assert_eq!(m.middle.get(&512).unwrap().live, 32);
+        assert!(m.get(512).is_some());
+        assert!(m.get(545).is_some());
+    }
+
+    #[test]
+    fn successor_matches_reference_across_blocks_and_gaps() {
+        let mut m = SentPackets::default();
+        let mut reference = BTreeMap::new();
+        let check = |m: &SentPackets, reference: &BTreeMap<u64, u16>| {
+            for pn in (0..2048).chain([u64::MAX - 1, u64::MAX]) {
+                assert_eq!(
+                    m.first_after(pn).map(|(n, p)| (n, p.size)),
+                    reference
+                        .range((Bound::Excluded(pn), Bound::Unbounded))
+                        .next()
+                        .map(|(&n, &size)| (n, size)),
+                    "successor of {pn}"
+                );
+            }
+        };
+        check(&m, &reference);
+        for pn in (0..2048).step_by(3).chain([u64::MAX]) {
+            m.insert(pn, packet(1200));
+            reference.insert(pn, 1200);
+        }
+        check(&m, &reference);
+        // Leave holes around stable directory fences and inside blocks.
+        for pn in (0..2048).step_by(3).filter(|pn| pn % 11 != 0) {
+            m.remove(pn);
+            reference.remove(&pn);
+        }
+        check(&m, &reference);
+        // Exercise middle-to-head promotion and exhausted tails.
+        for pn in reference.keys().copied().collect::<Vec<_>>() {
+            m.remove(pn);
+            reference.remove(&pn);
+            check(&m, &reference);
+        }
     }
 
     /// A `SentPacket` identified by its `size`.
