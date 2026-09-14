@@ -1,0 +1,56 @@
+{
+  "phase": "transfer",
+  "processes": 36,
+  "results": [
+    {
+      "case": "64MiB",
+      "metric": "gbit_s",
+      "medians": {
+        "pr": 4.686190205635409,
+        "packed": 4.880394970409174,
+        "successor-final": 4.983932241737932
+      },
+      "comparisons": {
+        "successor-final/pr": {
+          "ratio": 1.0450848994390909,
+          "ci95": [
+            1.0213228985917173,
+            1.0664154083089534
+          ]
+        },
+        "successor-final/packed": {
+          "ratio": 0.9896421992284328,
+          "ci95": [
+            0.9586010584680082,
+            1.0171815466224798
+          ]
+        }
+      }
+    },
+    {
+      "case": "64MiB",
+      "metric": "cpu_ns_byte",
+      "medians": {
+        "pr": 2.709405352852368,
+        "packed": 2.609297475821915,
+        "successor-final": 2.5682838779181387
+      },
+      "comparisons": {
+        "successor-final/pr": {
+          "ratio": 0.9596223938933468,
+          "ci95": [
+            0.9414275955051854,
+            0.9792781439470014
+          ]
+        },
+        "successor-final/packed": {
+          "ratio": 1.0106221571379637,
+          "ci95": [
+            0.988394956478783,
+            1.03417550301193
+          ]
+        }
+      }
+    }
+  ]
+}

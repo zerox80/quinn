@@ -1,0 +1,18 @@
+{
+  "block_size": 64,
+  "transfer_rounds": 12,
+  "micro_rounds": 6,
+  "notes": "The half-occupancy regression test was added after transfer measurements; the packet-storage algorithm was unchanged. Extended cleanup executables include the additional threshold case.",
+  "sha256": {
+    "packed/quinn-proto/src/connection/sent_packets.rs": "3b3995c82dc05ecfe20f38cf3d5098fc09771d032e6e1b10025a3e6f44efbc77",
+    "bin/pr-micro": "d2aea087b8169375e64bdc6e92911f35791f84463e03a166aa1f8a54caa9f561",
+    "bin/pr-e2e": "be07760b1a0017ead5b440f29a111cb5cd9c672a9d6d43e108727990ee84c841",
+    "bin/pr-cleanup-v2": "690ff8ec70f40a87e1b77d8f54faf02b4419d5e3c91fe5a1823830a72f7fdb69",
+    "bin/blocks-micro": "9146dc2286cb098b5fb26b034c9426db5f4bfdec8d2797cd5b8b229c611ff436",
+    "bin/blocks-e2e": "e7e33a67bf62943c9addccb576cae18fb8736f29d3425f1bca1f7c182a3d0f41",
+    "bin/blocks-cleanup-v2": "cb07418aedd05eab9b6d7b7877b5c4c2579a6a93398efee809a6228c7a2fc089",
+    "bin/packed-micro": "d25553786424675b5b6c7b0bf6600b8a8b528bd6d19bd79a3eba04dc344c10d0",
+    "bin/packed-e2e": "2b5d0d25a172b647a0949745ec1daa9ee24e0614fb32c9f1c33d2e7d86f2f50d",
+    "bin/packed-cleanup-v2": "30559da6a41ff76427228fcb908a31536e7e2cd2d792a4bdd6172d8312097906"
+  }
+}

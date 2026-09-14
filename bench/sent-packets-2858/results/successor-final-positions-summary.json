@@ -1,0 +1,181 @@
+{
+  "phase": "positions",
+  "processes": 126,
+  "results": [
+    {
+      "case": "head",
+      "metric": "ns_op",
+      "medians": {
+        "pr": 28.264196764821158,
+        "packed": 70.86896348915971,
+        "successor-final": 10.780013993448605
+      },
+      "comparisons": {
+        "successor-final/pr": {
+          "ratio": 0.390459239876723,
+          "ci95": [
+            0.3781904184297947,
+            0.4088908147412998
+          ]
+        },
+        "successor-final/packed": {
+          "ratio": 0.1523135625891689,
+          "ci95": [
+            0.1479541624706155,
+            0.15674884660141628
+          ]
+        }
+      }
+    },
+    {
+      "case": "middle",
+      "metric": "ns_op",
+      "medians": {
+        "pr": 40.81328575009445,
+        "packed": 86.19718443046855,
+        "successor-final": 27.871148533284547
+      },
+      "comparisons": {
+        "successor-final/pr": {
+          "ratio": 0.7150383095005032,
+          "ci95": [
+            0.6758669664446098,
+            0.7569822589976479
+          ]
+        },
+        "successor-final/packed": {
+          "ratio": 0.3306043307460514,
+          "ci95": [
+            0.31415929684529487,
+            0.3495029629705857
+          ]
+        }
+      }
+    },
+    {
+      "case": "tail",
+      "metric": "ns_op",
+      "medians": {
+        "pr": 47.173412019272476,
+        "packed": 81.66813626127941,
+        "successor-final": 16.969546643011412
+      },
+      "comparisons": {
+        "successor-final/pr": {
+          "ratio": 0.3622637018546712,
+          "ci95": [
+            0.33376873520134887,
+            0.39975265425358325
+          ]
+        },
+        "successor-final/packed": {
+          "ratio": 0.2069998198267205,
+          "ci95": [
+            0.1915360610055647,
+            0.2169508026759656
+          ]
+        }
+      }
+    },
+    {
+      "case": "past_end",
+      "metric": "ns_op",
+      "medians": {
+        "pr": 49.021603336787734,
+        "packed": 84.14901722699042,
+        "successor-final": 16.36141105961009
+      },
+      "comparisons": {
+        "successor-final/pr": {
+          "ratio": 0.32719786296983633,
+          "ci95": [
+            0.30602186441610046,
+            0.35697945845412604
+          ]
+        },
+        "successor-final/packed": {
+          "ratio": 0.19241326326788005,
+          "ci95": [
+            0.17390697235323158,
+            0.21108952539493522
+          ]
+        }
+      }
+    },
+    {
+      "case": "fragmented_middle",
+      "metric": "ns_op",
+      "medians": {
+        "pr": 26.488075171003196,
+        "packed": 82.86136885423453,
+        "successor-final": 27.762552830355133
+      },
+      "comparisons": {
+        "successor-final/pr": {
+          "ratio": 1.0404458310457383,
+          "ci95": [
+            0.9418289932230813,
+            1.1501781641781341
+          ]
+        },
+        "successor-final/packed": {
+          "ratio": 0.3262013477993365,
+          "ci95": [
+            0.304479557882945,
+            0.3469610211443211
+          ]
+        }
+      }
+    },
+    {
+      "case": "short_head",
+      "metric": "ns_op",
+      "medians": {
+        "pr": 83.13317976542854,
+        "packed": 80.29054207214745,
+        "successor-final": 89.36538541890641
+      },
+      "comparisons": {
+        "successor-final/pr": {
+          "ratio": 1.0752669981994418,
+          "ci95": [
+            1.0311116251302077,
+            1.1177145308873264
+          ]
+        },
+        "successor-final/packed": {
+          "ratio": 1.1047249772890892,
+          "ci95": [
+            1.060713638083027,
+            1.149615352633422
+          ]
+        }
+      }
+    },
+    {
+      "case": "full_scan",
+      "metric": "ns_op",
+      "medians": {
+        "pr": 208192.8835673309,
+        "packed": 155187.7414314516,
+        "successor-final": 158519.11573744443
+      },
+      "comparisons": {
+        "successor-final/pr": {
+          "ratio": 0.7598873589782648,
+          "ci95": [
+            0.7301524212171056,
+            0.791348834901171
+          ]
+        },
+        "successor-final/packed": {
+          "ratio": 1.014742783684358,
+          "ci95": [
+            0.9921888611714774,
+            1.0392882649422006
+          ]
+        }
+      }
+    }
+  ]
+}
