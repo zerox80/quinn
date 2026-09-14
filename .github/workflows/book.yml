@@ -8,6 +8,8 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Setup mdBook
@@ -15,7 +17,15 @@ jobs:
         with:
           mdbook-version: 'latest'
       - run: mdbook build ./docs/book
+      - name: Upload book
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: book
+          path: ./docs/book/book
+          if-no-files-found: error
       - name: Deploy
+        # Forks can opt in after configuring GitHub Pages.
+        if: github.repository == 'quinn-rs/quinn' || vars.DEPLOY_BOOK == 'true'
         uses: peaceiris/actions-gh-pages@84c30a85c19949d7eee79c4ff27748b70285e453 # v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
