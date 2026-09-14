@@ -1,0 +1,6 @@
+   Compiling quinn-udp v0.6.2 (/home/mavi/quinn-bench-2858/successor-review/quinn-udp)
+   Compiling quinn v0.12.0 (/home/mavi/quinn-bench-2858/successor-review/quinn)
+    Checking quinn-proto v0.12.0 (/home/mavi/quinn-bench-2858/successor-review/quinn-proto)
+    Checking bench v0.1.0 (/home/mavi/quinn-bench-2858/successor-review/bench)
+    Checking perf v0.1.0 (/home/mavi/quinn-bench-2858/successor-review/perf)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 10.75s

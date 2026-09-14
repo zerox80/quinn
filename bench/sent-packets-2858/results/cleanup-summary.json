@@ -1,0 +1,428 @@
+[
+  {
+    "variant": "pr",
+    "kind": "cleanup_comparison",
+    "case": "global_compaction_pattern",
+    "window": 1024,
+    "median_ns": 124.5,
+    "p95_ns": 249,
+    "max_ns": 2792
+  },
+  {
+    "variant": "pr",
+    "kind": "cleanup_comparison",
+    "case": "prefix_pattern",
+    "window": 1024,
+    "median_ns": 130.0,
+    "p95_ns": 223,
+    "max_ns": 237
+  },
+  {
+    "variant": "pr",
+    "kind": "cleanup_comparison",
+    "case": "suffix_pattern",
+    "window": 1024,
+    "median_ns": 63.0,
+    "p95_ns": 125,
+    "max_ns": 161
+  },
+  {
+    "variant": "pr",
+    "kind": "cleanup_comparison",
+    "case": "block_compaction",
+    "window": 1024,
+    "median_ns": 54.0,
+    "p95_ns": 130,
+    "max_ns": 159
+  },
+  {
+    "variant": "pr",
+    "kind": "cleanup_comparison",
+    "case": "empty_block",
+    "window": 1024,
+    "median_ns": 84.0,
+    "p95_ns": 163,
+    "max_ns": 176
+  },
+  {
+    "variant": "pr",
+    "kind": "cleanup_comparison",
+    "case": "global_compaction_pattern",
+    "window": 16384,
+    "median_ns": 114.0,
+    "p95_ns": 214,
+    "max_ns": 303
+  },
+  {
+    "variant": "pr",
+    "kind": "cleanup_comparison",
+    "case": "prefix_pattern",
+    "window": 16384,
+    "median_ns": 149.5,
+    "p95_ns": 586,
+    "max_ns": 587
+  },
+  {
+    "variant": "pr",
+    "kind": "cleanup_comparison",
+    "case": "suffix_pattern",
+    "window": 16384,
+    "median_ns": 172.5,
+    "p95_ns": 284,
+    "max_ns": 297
+  },
+  {
+    "variant": "pr",
+    "kind": "cleanup_comparison",
+    "case": "block_compaction",
+    "window": 16384,
+    "median_ns": 181.5,
+    "p95_ns": 349,
+    "max_ns": 363
+  },
+  {
+    "variant": "pr",
+    "kind": "cleanup_comparison",
+    "case": "empty_block",
+    "window": 16384,
+    "median_ns": 141.5,
+    "p95_ns": 253,
+    "max_ns": 442
+  },
+  {
+    "variant": "pr",
+    "kind": "cleanup_comparison",
+    "case": "global_compaction_pattern",
+    "window": 65536,
+    "median_ns": 557.0,
+    "p95_ns": 867,
+    "max_ns": 897
+  },
+  {
+    "variant": "pr",
+    "kind": "cleanup_comparison",
+    "case": "prefix_pattern",
+    "window": 65536,
+    "median_ns": 650.0,
+    "p95_ns": 875,
+    "max_ns": 888
+  },
+  {
+    "variant": "pr",
+    "kind": "cleanup_comparison",
+    "case": "suffix_pattern",
+    "window": 65536,
+    "median_ns": 622.0,
+    "p95_ns": 795,
+    "max_ns": 892
+  },
+  {
+    "variant": "pr",
+    "kind": "cleanup_comparison",
+    "case": "block_compaction",
+    "window": 65536,
+    "median_ns": 408.0,
+    "p95_ns": 645,
+    "max_ns": 662
+  },
+  {
+    "variant": "pr",
+    "kind": "cleanup_comparison",
+    "case": "empty_block",
+    "window": 65536,
+    "median_ns": 725.0,
+    "p95_ns": 903,
+    "max_ns": 904
+  },
+  {
+    "variant": "blocks",
+    "kind": "cleanup_comparison",
+    "case": "global_compaction_pattern",
+    "window": 1024,
+    "median_ns": 54.0,
+    "p95_ns": 128,
+    "max_ns": 206
+  },
+  {
+    "variant": "blocks",
+    "kind": "cleanup_comparison",
+    "case": "prefix_pattern",
+    "window": 1024,
+    "median_ns": 90.0,
+    "p95_ns": 105,
+    "max_ns": 187
+  },
+  {
+    "variant": "blocks",
+    "kind": "cleanup_comparison",
+    "case": "suffix_pattern",
+    "window": 1024,
+    "median_ns": 42.0,
+    "p95_ns": 42,
+    "max_ns": 62
+  },
+  {
+    "variant": "blocks",
+    "kind": "cleanup_comparison",
+    "case": "block_compaction",
+    "window": 1024,
+    "median_ns": 298.0,
+    "p95_ns": 320,
+    "max_ns": 343
+  },
+  {
+    "variant": "blocks",
+    "kind": "cleanup_comparison",
+    "case": "empty_block",
+    "window": 1024,
+    "median_ns": 105.0,
+    "p95_ns": 168,
+    "max_ns": 221
+  },
+  {
+    "variant": "blocks",
+    "kind": "cleanup_comparison",
+    "case": "global_compaction_pattern",
+    "window": 16384,
+    "median_ns": 81.5,
+    "p95_ns": 133,
+    "max_ns": 144
+  },
+  {
+    "variant": "blocks",
+    "kind": "cleanup_comparison",
+    "case": "prefix_pattern",
+    "window": 16384,
+    "median_ns": 241.5,
+    "p95_ns": 445,
+    "max_ns": 586
+  },
+  {
+    "variant": "blocks",
+    "kind": "cleanup_comparison",
+    "case": "suffix_pattern",
+    "window": 16384,
+    "median_ns": 82.5,
+    "p95_ns": 147,
+    "max_ns": 150
+  },
+  {
+    "variant": "blocks",
+    "kind": "cleanup_comparison",
+    "case": "block_compaction",
+    "window": 16384,
+    "median_ns": 529.0,
+    "p95_ns": 739,
+    "max_ns": 935
+  },
+  {
+    "variant": "blocks",
+    "kind": "cleanup_comparison",
+    "case": "empty_block",
+    "window": 16384,
+    "median_ns": 364.5,
+    "p95_ns": 676,
+    "max_ns": 745
+  },
+  {
+    "variant": "blocks",
+    "kind": "cleanup_comparison",
+    "case": "global_compaction_pattern",
+    "window": 65536,
+    "median_ns": 131.5,
+    "p95_ns": 251,
+    "max_ns": 264
+  },
+  {
+    "variant": "blocks",
+    "kind": "cleanup_comparison",
+    "case": "prefix_pattern",
+    "window": 65536,
+    "median_ns": 357.5,
+    "p95_ns": 522,
+    "max_ns": 601
+  },
+  {
+    "variant": "blocks",
+    "kind": "cleanup_comparison",
+    "case": "suffix_pattern",
+    "window": 65536,
+    "median_ns": 85.0,
+    "p95_ns": 192,
+    "max_ns": 256
+  },
+  {
+    "variant": "blocks",
+    "kind": "cleanup_comparison",
+    "case": "block_compaction",
+    "window": 65536,
+    "median_ns": 1142.0,
+    "p95_ns": 1797,
+    "max_ns": 1822
+  },
+  {
+    "variant": "blocks",
+    "kind": "cleanup_comparison",
+    "case": "empty_block",
+    "window": 65536,
+    "median_ns": 672.0,
+    "p95_ns": 1301,
+    "max_ns": 1344
+  },
+  {
+    "variant": "trim",
+    "kind": "cleanup_comparison",
+    "case": "global_compaction_pattern",
+    "window": 1024,
+    "median_ns": 5700.5,
+    "p95_ns": 5854,
+    "max_ns": 9992
+  },
+  {
+    "variant": "trim",
+    "kind": "cleanup_comparison",
+    "case": "prefix_pattern",
+    "window": 1024,
+    "median_ns": 1857.5,
+    "p95_ns": 2194,
+    "max_ns": 6931
+  },
+  {
+    "variant": "trim",
+    "kind": "cleanup_comparison",
+    "case": "suffix_pattern",
+    "window": 1024,
+    "median_ns": 814.5,
+    "p95_ns": 1041,
+    "max_ns": 1108
+  },
+  {
+    "variant": "trim",
+    "kind": "cleanup_comparison",
+    "case": "block_compaction",
+    "window": 1024,
+    "median_ns": 50.5,
+    "p95_ns": 52,
+    "max_ns": 52
+  },
+  {
+    "variant": "trim",
+    "kind": "cleanup_comparison",
+    "case": "empty_block",
+    "window": 1024,
+    "median_ns": 52.0,
+    "p95_ns": 55,
+    "max_ns": 63
+  },
+  {
+    "variant": "trim",
+    "kind": "cleanup_comparison",
+    "case": "global_compaction_pattern",
+    "window": 16384,
+    "median_ns": 136897.5,
+    "p95_ns": 238773,
+    "max_ns": 254299
+  },
+  {
+    "variant": "trim",
+    "kind": "cleanup_comparison",
+    "case": "prefix_pattern",
+    "window": 16384,
+    "median_ns": 35130.5,
+    "p95_ns": 37593,
+    "max_ns": 37862
+  },
+  {
+    "variant": "trim",
+    "kind": "cleanup_comparison",
+    "case": "suffix_pattern",
+    "window": 16384,
+    "median_ns": 13648.0,
+    "p95_ns": 14773,
+    "max_ns": 14965
+  },
+  {
+    "variant": "trim",
+    "kind": "cleanup_comparison",
+    "case": "block_compaction",
+    "window": 16384,
+    "median_ns": 53.0,
+    "p95_ns": 85,
+    "max_ns": 87
+  },
+  {
+    "variant": "trim",
+    "kind": "cleanup_comparison",
+    "case": "empty_block",
+    "window": 16384,
+    "median_ns": 61.5,
+    "p95_ns": 141,
+    "max_ns": 148
+  },
+  {
+    "variant": "trim",
+    "kind": "cleanup_comparison",
+    "case": "global_compaction_pattern",
+    "window": 65536,
+    "median_ns": 1056768.5,
+    "p95_ns": 2050721,
+    "max_ns": 2253404
+  },
+  {
+    "variant": "trim",
+    "kind": "cleanup_comparison",
+    "case": "prefix_pattern",
+    "window": 65536,
+    "median_ns": 141085.5,
+    "p95_ns": 180494,
+    "max_ns": 223000
+  },
+  {
+    "variant": "trim",
+    "kind": "cleanup_comparison",
+    "case": "suffix_pattern",
+    "window": 65536,
+    "median_ns": 70529.5,
+    "p95_ns": 87782,
+    "max_ns": 112324
+  },
+  {
+    "variant": "trim",
+    "kind": "cleanup_comparison",
+    "case": "block_compaction",
+    "window": 65536,
+    "median_ns": 94.0,
+    "p95_ns": 169,
+    "max_ns": 279
+  },
+  {
+    "variant": "trim",
+    "kind": "cleanup_comparison",
+    "case": "empty_block",
+    "window": 65536,
+    "median_ns": 79.5,
+    "p95_ns": 145,
+    "max_ns": 153
+  },
+  {
+    "variant": "pr",
+    "kind": "fragmented_memory",
+    "case": "one_per_block",
+    "live": 1024,
+    "allocated_bytes": 198528
+  },
+  {
+    "variant": "blocks",
+    "kind": "fragmented_memory",
+    "case": "one_per_block",
+    "live": 1024,
+    "allocated_bytes": 327536
+  },
+  {
+    "variant": "trim",
+    "kind": "fragmented_memory",
+    "case": "one_per_block",
+    "live": 1024,
+    "allocated_bytes": 426144
+  }
+]

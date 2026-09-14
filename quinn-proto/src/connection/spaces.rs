@@ -2,7 +2,7 @@ use std::{
     cmp,
     collections::{BTreeMap, VecDeque},
     mem,
-    ops::{Bound, Index, IndexMut, Range},
+    ops::{Index, IndexMut, Range},
 };
 
 use rand::{Rng, RngExt};
@@ -242,11 +242,7 @@ impl PacketSpace {
         } else if self.unacked_non_ack_eliciting_tail > MAX_UNACKED_NON_ACK_ELICTING_TAIL {
             let oldest_after_ack_eliciting = self
                 .sent_packets
-                .range((
-                    Bound::Excluded(self.largest_ack_eliciting_sent),
-                    Bound::Unbounded,
-                ))
-                .next()
+                .first_after(self.largest_ack_eliciting_sent)
                 .unwrap()
                 .0;
             // Per https://www.rfc-editor.org/rfc/rfc9000.html#name-frames-and-frame-types,

@@ -1,0 +1,13 @@
+{
+  "head": "d11d61556d41395aedbde7ff52e0b9e1af25aa42",
+  "branch": "codex/pr-2858-trim-experiment",
+  "sha256": {
+    "trim/quinn-proto/src/connection/sent_packets.rs": "da504cc445b221eab4e89af989ccd0c136f790468d462491c32a532a6b4724ca",
+    "bin/trim-micro": "e8a18c2ed26079f163b75a8e60ca51bf32c6b30fe10f18002c7f3a97b4abdd95",
+    "bin/trim-e2e": "4ebcdc4f17fe10e9592a2ee01d765475b2c646dfcec7c159548374fd79e4b1df",
+    "bin/compact-micro": "f725ab277131b632650a12144f88809de83708f542f2b76165d2ddb784d11eb8",
+    "bin/compact-e2e": "9c9961a1b90b99e8cf40d247f0c01129a90585dc2035d84b10eeb9926a21294e",
+    "bin/pr-micro": "d2aea087b8169375e64bdc6e92911f35791f84463e03a166aa1f8a54caa9f561",
+    "bin/pr-e2e": "be07760b1a0017ead5b440f29a111cb5cd9c672a9d6d43e108727990ee84c841"
+  }
+}

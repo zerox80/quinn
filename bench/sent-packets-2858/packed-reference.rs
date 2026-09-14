@@ -59,12 +59,6 @@ impl Block {
         }
         p.as_ref()
     }
-    #[inline]
-    fn first_after(&self, pn: u64) -> Option<(u64, &SentPacket)> {
-        self.slots
-            .range(self.lower_bound(pn)..)
-            .find_map(|(key, p)| p.as_ref().filter(|_| *key > pn).map(|p| (*key, p)))
-    }
     fn remove(&mut self, pn: u64) -> Option<SentPacket> {
         let i = self.lower_bound(pn);
         let (key, p) = self.slots.get_mut(i)?;
@@ -123,11 +117,6 @@ struct FrozenBlock {
     live: usize,
 }
 impl FrozenBlock {
-    fn first_after(&self, pn: u64) -> Option<(u64, &SentPacket)> {
-        self.slots[self.lower_bound(pn)..]
-            .iter()
-            .find_map(|(key, p)| p.as_ref().filter(|_| *key > pn).map(|p| (*key, p)))
-    }
     fn from_block(block: Block) -> Self {
         Self {
             slots: Vec::from(block.slots).into_boxed_slice(),
@@ -276,31 +265,6 @@ impl SentPackets {
     }
     pub(super) fn has_in_flight(&self) -> bool {
         self.in_flight != 0
-    }
-    /// Find the first live packet strictly after `pn` without constructing a
-    /// general range iterator spanning all three storage regions.
-    #[inline]
-    pub(super) fn first_after(&self, pn: u64) -> Option<(u64, &SentPacket)> {
-        self.head
-            .first_after(pn)
-            .or_else(|| self.first_after_head(pn))
-    }
-    fn first_after_head(&self, pn: u64) -> Option<(u64, &SentPacket)> {
-        if !self.tail.is_empty() && pn >= self.tail.first() {
-            return self.tail.first_after(pn);
-        }
-        // Most interior hits need only the containing block. Only search for
-        // a later block when that block has no live successor.
-        if let Some((_, block)) = self.middle.range(..=pn).next_back()
-            && let Some(packet) = block.first_after(pn)
-        {
-            return Some(packet);
-        }
-        self.middle
-            .range((Bound::Excluded(pn), Bound::Unbounded))
-            .next()
-            .and_then(|(_, block)| block.first_after(pn))
-            .or_else(|| self.tail.first_after(pn))
     }
     pub(super) fn range(
         &self,
@@ -646,42 +610,6 @@ mod tests {
         assert_eq!(m.middle.get(&512).unwrap().live, 32);
         assert!(m.get(512).is_some());
         assert!(m.get(545).is_some());
-    }
-
-    #[test]
-    fn successor_matches_reference_across_blocks_and_gaps() {
-        let mut m = SentPackets::default();
-        let mut reference = BTreeMap::new();
-        let check = |m: &SentPackets, reference: &BTreeMap<u64, u16>| {
-            for pn in (0..2048).chain([u64::MAX - 1, u64::MAX]) {
-                assert_eq!(
-                    m.first_after(pn).map(|(n, p)| (n, p.size)),
-                    reference
-                        .range((Bound::Excluded(pn), Bound::Unbounded))
-                        .next()
-                        .map(|(&n, &size)| (n, size)),
-                    "successor of {pn}"
-                );
-            }
-        };
-        check(&m, &reference);
-        for pn in (0..2048).step_by(3).chain([u64::MAX]) {
-            m.insert(pn, packet(1200));
-            reference.insert(pn, 1200);
-        }
-        check(&m, &reference);
-        // Leave holes around stable directory fences and inside blocks.
-        for pn in (0..2048).step_by(3).filter(|pn| pn % 11 != 0) {
-            m.remove(pn);
-            reference.remove(&pn);
-        }
-        check(&m, &reference);
-        // Exercise middle-to-head promotion and exhausted tails.
-        for pn in reference.keys().copied().collect::<Vec<_>>() {
-            m.remove(pn);
-            reference.remove(&pn);
-            check(&m, &reference);
-        }
     }
 
     /// A `SentPacket` identified by its `size`.

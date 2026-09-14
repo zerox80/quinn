@@ -1,0 +1,62 @@
+{
+  "base": "d11d61556d41395aedbde7ff52e0b9e1af25aa42",
+  "published_packed": "b7839fd60512079e9207b9867666ad3fa24db533",
+  "candidate": "successor-final",
+  "phases": {
+    "micro": {
+      "processes": 90,
+      "rows": 90,
+      "temperature_c": [
+        95.0,
+        102.0
+      ]
+    },
+    "positions": {
+      "processes": 126,
+      "rows": 126,
+      "temperature_c": [
+        94.0,
+        102.0
+      ]
+    },
+    "transfer": {
+      "processes": 36,
+      "rows": 36,
+      "temperature_c": [
+        91.0,
+        101.0
+      ]
+    },
+    "cleanup": {
+      "processes": 6,
+      "rows": 57,
+      "temperature_c": [
+        94.0,
+        101.0
+      ]
+    }
+  },
+  "sha256": {
+    "artifacts/successor-final-micro-results.jsonl": "5e76304429454aed170d5e50efb555240b8d4540cea611ce73937d45845da674",
+    "artifacts/successor-final-positions-results.jsonl": "164e2fee1b4d8f3207ac2e1b3a1dd736f9ff88992c449255adb1bfb4f8b2cd80",
+    "artifacts/successor-final-transfer-results.jsonl": "2d6cf8bdf9c5de77266feefdfa0715009d7eb9cf7acee429c97be46bc1f7f19d",
+    "artifacts/successor-final-cleanup-results.jsonl": "9228be43a34e912fbd155e583a2fd3373d1482b852f4160fd3d0c8764a53aaa3",
+    "bin/pr-micro": "d2aea087b8169375e64bdc6e92911f35791f84463e03a166aa1f8a54caa9f561",
+    "bin/pr-e2e": "be07760b1a0017ead5b440f29a111cb5cd9c672a9d6d43e108727990ee84c841",
+    "bin/pr-range-positions": "4eed71825b5365ada2c0a2963b17f6575ea092248f4e73a643c7f2584de4bed1",
+    "bin/pr-cleanup-v2": "690ff8ec70f40a87e1b77d8f54faf02b4419d5e3c91fe5a1823830a72f7fdb69",
+    "bin/packed-micro": "d25553786424675b5b6c7b0bf6600b8a8b528bd6d19bd79a3eba04dc344c10d0",
+    "bin/packed-e2e": "2b5d0d25a172b647a0949745ec1daa9ee24e0614fb32c9f1c33d2e7d86f2f50d",
+    "bin/packed-range-positions": "dc58f1e7f1f8726d869609bb552aea6e3272faab43fe032111493dc57f04c83c",
+    "bin/packed-cleanup-v2": "30559da6a41ff76427228fcb908a31536e7e2cd2d792a4bdd6172d8312097906",
+    "bin/successor-final-micro": "6d3c934e056433ae0d0a86ca6dfe7889fe3b6c5310b355e38bad1023db7288f7",
+    "bin/successor-final-e2e": "11855314bd1ee0e33d4b50310503e20d35f253bd351f56c4ea76f863dc4a1567",
+    "bin/successor-final-range-positions": "7a773e4f76ec6bbb6974f06f5c5f6bca29072a04c6c7a523016419269b4d53ac",
+    "successor-final/quinn-proto/src/connection/sent_packets.rs": "e59237ccb91f61c53511567f20d727b2f18658db319affac9edd5644657dbd5d",
+    "/home/mavi/quinn-bench-2858/successor-review/quinn-proto/src/connection/sent_packets.rs": "16f89b274eae0bd332a632765fdd34fe69f7bcdf8cfbe63c62b80a0f5605e2e9",
+    "successor-final/quinn-proto/src/connection/spaces.rs": "ecf688bed3f10230bbc371560d4e31418986f172d0883e2b576badb10a065c47",
+    "/home/mavi/quinn-bench-2858/successor-review/quinn-proto/src/connection/spaces.rs": "ecf688bed3f10230bbc371560d4e31418986f172d0883e2b576badb10a065c47"
+  },
+  "processes": 258,
+  "notes": "The clean review source matches the output of rustfmt on the measured source (including formatter removal of redundant closure braces). First-successor benchmark calls use first_after on the candidate and range(...).next() on the references; the actual PacketSpace::sent call site is changed too. General range scans keep the same API."
+}

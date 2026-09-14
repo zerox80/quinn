@@ -1,0 +1,402 @@
+{
+  "phase": "cleanup",
+  "processes": 6,
+  "results": [
+    {
+      "variant": "pr",
+      "case": "global_compaction_pattern",
+      "window": 1024,
+      "median_ns": 124.0,
+      "max_ns": 4262
+    },
+    {
+      "variant": "pr",
+      "case": "prefix_pattern",
+      "window": 1024,
+      "median_ns": 125.0,
+      "max_ns": 181
+    },
+    {
+      "variant": "pr",
+      "case": "suffix_pattern",
+      "window": 1024,
+      "median_ns": 67.0,
+      "max_ns": 201
+    },
+    {
+      "variant": "pr",
+      "case": "block_compaction",
+      "window": 1024,
+      "median_ns": 54.5,
+      "max_ns": 224
+    },
+    {
+      "variant": "pr",
+      "case": "half_block_compaction",
+      "window": 1024,
+      "median_ns": 56.0,
+      "max_ns": 79
+    },
+    {
+      "variant": "pr",
+      "case": "empty_block",
+      "window": 1024,
+      "median_ns": 85.5,
+      "max_ns": 208
+    },
+    {
+      "variant": "pr",
+      "case": "global_compaction_pattern",
+      "window": 16384,
+      "median_ns": 229.0,
+      "max_ns": 412
+    },
+    {
+      "variant": "pr",
+      "case": "prefix_pattern",
+      "window": 16384,
+      "median_ns": 141.5,
+      "max_ns": 404
+    },
+    {
+      "variant": "pr",
+      "case": "suffix_pattern",
+      "window": 16384,
+      "median_ns": 154.0,
+      "max_ns": 432
+    },
+    {
+      "variant": "pr",
+      "case": "block_compaction",
+      "window": 16384,
+      "median_ns": 166.5,
+      "max_ns": 283
+    },
+    {
+      "variant": "pr",
+      "case": "half_block_compaction",
+      "window": 16384,
+      "median_ns": 230.5,
+      "max_ns": 337
+    },
+    {
+      "variant": "pr",
+      "case": "empty_block",
+      "window": 16384,
+      "median_ns": 232.5,
+      "max_ns": 330
+    },
+    {
+      "variant": "pr",
+      "case": "global_compaction_pattern",
+      "window": 65536,
+      "median_ns": 563.0,
+      "max_ns": 1119
+    },
+    {
+      "variant": "pr",
+      "case": "prefix_pattern",
+      "window": 65536,
+      "median_ns": 660.5,
+      "max_ns": 1142
+    },
+    {
+      "variant": "pr",
+      "case": "suffix_pattern",
+      "window": 65536,
+      "median_ns": 455.0,
+      "max_ns": 891
+    },
+    {
+      "variant": "pr",
+      "case": "block_compaction",
+      "window": 65536,
+      "median_ns": 388.0,
+      "max_ns": 664
+    },
+    {
+      "variant": "pr",
+      "case": "half_block_compaction",
+      "window": 65536,
+      "median_ns": 424.5,
+      "max_ns": 811
+    },
+    {
+      "variant": "pr",
+      "case": "empty_block",
+      "window": 65536,
+      "median_ns": 755.5,
+      "max_ns": 1044
+    },
+    {
+      "variant": "packed",
+      "case": "global_compaction_pattern",
+      "window": 1024,
+      "median_ns": 52.0,
+      "max_ns": 109
+    },
+    {
+      "variant": "packed",
+      "case": "prefix_pattern",
+      "window": 1024,
+      "median_ns": 87.0,
+      "max_ns": 577
+    },
+    {
+      "variant": "packed",
+      "case": "suffix_pattern",
+      "window": 1024,
+      "median_ns": 42.0,
+      "max_ns": 75
+    },
+    {
+      "variant": "packed",
+      "case": "block_compaction",
+      "window": 1024,
+      "median_ns": 75.0,
+      "max_ns": 94
+    },
+    {
+      "variant": "packed",
+      "case": "half_block_compaction",
+      "window": 1024,
+      "median_ns": 189.5,
+      "max_ns": 307
+    },
+    {
+      "variant": "packed",
+      "case": "empty_block",
+      "window": 1024,
+      "median_ns": 103.0,
+      "max_ns": 937
+    },
+    {
+      "variant": "packed",
+      "case": "global_compaction_pattern",
+      "window": 16384,
+      "median_ns": 66.5,
+      "max_ns": 208
+    },
+    {
+      "variant": "packed",
+      "case": "prefix_pattern",
+      "window": 16384,
+      "median_ns": 246.5,
+      "max_ns": 615
+    },
+    {
+      "variant": "packed",
+      "case": "suffix_pattern",
+      "window": 16384,
+      "median_ns": 57.5,
+      "max_ns": 161
+    },
+    {
+      "variant": "packed",
+      "case": "block_compaction",
+      "window": 16384,
+      "median_ns": 83.0,
+      "max_ns": 144
+    },
+    {
+      "variant": "packed",
+      "case": "half_block_compaction",
+      "window": 16384,
+      "median_ns": 268.0,
+      "max_ns": 386
+    },
+    {
+      "variant": "packed",
+      "case": "empty_block",
+      "window": 16384,
+      "median_ns": 295.5,
+      "max_ns": 599
+    },
+    {
+      "variant": "packed",
+      "case": "global_compaction_pattern",
+      "window": 65536,
+      "median_ns": 80.0,
+      "max_ns": 248
+    },
+    {
+      "variant": "packed",
+      "case": "prefix_pattern",
+      "window": 65536,
+      "median_ns": 567.0,
+      "max_ns": 893
+    },
+    {
+      "variant": "packed",
+      "case": "suffix_pattern",
+      "window": 65536,
+      "median_ns": 91.0,
+      "max_ns": 260
+    },
+    {
+      "variant": "packed",
+      "case": "block_compaction",
+      "window": 65536,
+      "median_ns": 97.0,
+      "max_ns": 229
+    },
+    {
+      "variant": "packed",
+      "case": "half_block_compaction",
+      "window": 65536,
+      "median_ns": 547.5,
+      "max_ns": 991
+    },
+    {
+      "variant": "packed",
+      "case": "empty_block",
+      "window": 65536,
+      "median_ns": 749.5,
+      "max_ns": 1872
+    },
+    {
+      "variant": "successor-final",
+      "case": "global_compaction_pattern",
+      "window": 1024,
+      "median_ns": 55.0,
+      "max_ns": 122
+    },
+    {
+      "variant": "successor-final",
+      "case": "prefix_pattern",
+      "window": 1024,
+      "median_ns": 95.0,
+      "max_ns": 409
+    },
+    {
+      "variant": "successor-final",
+      "case": "suffix_pattern",
+      "window": 1024,
+      "median_ns": 42.0,
+      "max_ns": 111
+    },
+    {
+      "variant": "successor-final",
+      "case": "block_compaction",
+      "window": 1024,
+      "median_ns": 75.0,
+      "max_ns": 102
+    },
+    {
+      "variant": "successor-final",
+      "case": "half_block_compaction",
+      "window": 1024,
+      "median_ns": 183.5,
+      "max_ns": 306
+    },
+    {
+      "variant": "successor-final",
+      "case": "empty_block",
+      "window": 1024,
+      "median_ns": 85.0,
+      "max_ns": 450
+    },
+    {
+      "variant": "successor-final",
+      "case": "global_compaction_pattern",
+      "window": 16384,
+      "median_ns": 59.0,
+      "max_ns": 164
+    },
+    {
+      "variant": "successor-final",
+      "case": "prefix_pattern",
+      "window": 16384,
+      "median_ns": 277.5,
+      "max_ns": 775
+    },
+    {
+      "variant": "successor-final",
+      "case": "suffix_pattern",
+      "window": 16384,
+      "median_ns": 49.0,
+      "max_ns": 110
+    },
+    {
+      "variant": "successor-final",
+      "case": "block_compaction",
+      "window": 16384,
+      "median_ns": 102.0,
+      "max_ns": 165
+    },
+    {
+      "variant": "successor-final",
+      "case": "half_block_compaction",
+      "window": 16384,
+      "median_ns": 282.0,
+      "max_ns": 514
+    },
+    {
+      "variant": "successor-final",
+      "case": "empty_block",
+      "window": 16384,
+      "median_ns": 225.0,
+      "max_ns": 847
+    },
+    {
+      "variant": "successor-final",
+      "case": "global_compaction_pattern",
+      "window": 65536,
+      "median_ns": 87.5,
+      "max_ns": 246
+    },
+    {
+      "variant": "successor-final",
+      "case": "prefix_pattern",
+      "window": 65536,
+      "median_ns": 688.0,
+      "max_ns": 1377
+    },
+    {
+      "variant": "successor-final",
+      "case": "suffix_pattern",
+      "window": 65536,
+      "median_ns": 58.5,
+      "max_ns": 200
+    },
+    {
+      "variant": "successor-final",
+      "case": "block_compaction",
+      "window": 65536,
+      "median_ns": 174.5,
+      "max_ns": 289
+    },
+    {
+      "variant": "successor-final",
+      "case": "half_block_compaction",
+      "window": 65536,
+      "median_ns": 742.5,
+      "max_ns": 1047
+    },
+    {
+      "variant": "successor-final",
+      "case": "empty_block",
+      "window": 65536,
+      "median_ns": 487.5,
+      "max_ns": 998
+    },
+    {
+      "variant": "pr",
+      "case": "one_per_block",
+      "live": 1024,
+      "allocated_bytes": 198528
+    },
+    {
+      "variant": "packed",
+      "case": "one_per_block",
+      "live": 1024,
+      "allocated_bytes": 182976
+    },
+    {
+      "variant": "successor-final",
+      "case": "one_per_block",
+      "live": 1024,
+      "allocated_bytes": 182976
+    }
+  ]
+}
