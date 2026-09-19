@@ -35,9 +35,25 @@ impl Connection {
 
         // If we need to send a probe, make sure we have something to send.
         for space in SpaceId::iter() {
-            let request_immediate_ack =
-                space == SpaceId::Data && self.peer_supports_ack_frequency();
-            self.spaces[space].maybe_queue_probe(request_immediate_ack, &self.streams);
+            if space != SpaceId::Data {
+                self.spaces[space].maybe_queue_probe(false, false, &self.streams);
+                continue;
+            }
+
+            let has_ack_eliciting_data = self.can_send_1rtt(
+                Ord::min(segment_size, usize::from(INITIAL_MTU)).saturating_sub(
+                    self.predict_1rtt_overhead(Some(
+                        self.packet_number_filter.peek(&self.spaces[SpaceId::Data]),
+                    )),
+                ),
+            );
+            let request_immediate_ack = self.peer_supports_ack_frequency();
+
+            self.spaces[space].maybe_queue_probe(
+                request_immediate_ack,
+                has_ack_eliciting_data,
+                &self.streams,
+            );
         }
 
         // Check whether we need to send a close message
@@ -121,7 +137,7 @@ impl Connection {
                 buf.len()
             };
 
-            let tag_len = if let Some(ref crypto) = self.spaces[space_id].crypto {
+            let tag_len = if let Some(crypto) = &self.spaces[space_id].crypto {
                 crypto.packet.local.tag_len()
             } else if space_id == SpaceId::Data {
                 self.zero_rtt_crypto.as_ref().expect(
@@ -154,8 +170,13 @@ impl Connection {
                 }
 
                 // Congestion control and pacing checks
-                // Tail loss probes must not be blocked by congestion, or a deadlock could arise
-                if ack_eliciting && self.spaces[space_id].loss_probes == 0 {
+                // Tail loss probes must not be blocked by congestion, or a deadlock could arise.
+                // Close packets contain only ACKs and CONNECTION_CLOSE, neither of which is
+                // congestion controlled, and must not be blocked either: `ack_eliciting` reflects
+                // pending frames that will never be sent once closing, and a closed connection no
+                // longer processes ACKs, so the window could never drain
+                // (see https://github.com/quinn-rs/quinn/issues/2785)
+                if ack_eliciting && self.spaces[space_id].loss_probes == 0 && !close {
                     // Assume the current packet will get padded to fill the segment
                     let untracked_bytes = if let Some(builder) = &builder_storage {
                         buf_capacity - builder.partial_encode.start
@@ -318,7 +339,7 @@ impl Connection {
                 // sends its first Handshake packet.
                 self.discard_space(now, SpaceId::Initial);
             }
-            if let Some(ref mut prev) = self.prev_crypto {
+            if let Some(prev) = &mut self.prev_crypto {
                 prev.update_unacked = false;
             }
 
@@ -350,13 +371,14 @@ impl Connection {
                 // especially important with ack delay, since the peer might not
                 // have gotten any other ACK for the data earlier on.
                 if !self.spaces[space_id].pending_acks.ranges().is_empty() {
-                    Self::populate_acks(
+                    Self::try_populate_acks(
                         now,
                         self.receiving_ecn,
                         &mut SentFrames::default(),
                         &mut self.spaces[space_id],
                         buf,
                         &mut self.stats,
+                        buf_capacity,
                     );
                 }
 
@@ -369,8 +391,8 @@ impl Connection {
                 );
                 if buf.len() + frame::ConnectionClose::SIZE_BOUND < builder.max_size {
                     let max_frame_size = builder.max_size - buf.len();
-                    match self.state {
-                        State::Closed(state::Closed { ref reason }) => {
+                    match &self.state {
+                        State::Closed(state::Closed { reason }) => {
                             if space_id == SpaceId::Data || reason.is_transport_layer() {
                                 reason.encode(buf, max_frame_size)
                             } else {
@@ -409,37 +431,37 @@ impl Connection {
 
             // Send an off-path PATH_RESPONSE. Prioritized over on-path data to ensure that path
             // validation can occur while the link is saturated.
-            if space_id == SpaceId::Data && num_datagrams == 1 {
-                if let Some((token, remote, local_ip)) = self
+            if space_id == SpaceId::Data
+                && num_datagrams == 1
+                && let Some((token, remote, local_ip)) = self
                     .path_responses
                     .pop_off_path(self.path.remote, self.local_ip)
-                {
-                    // `unwrap` guaranteed to succeed because `builder_storage` was populated just
-                    // above.
-                    let mut builder = builder_storage.take().unwrap();
-                    trace!("PATH_RESPONSE {:08x} (off-path)", token);
-                    buf.write(frame::FrameType::PATH_RESPONSE);
-                    buf.write(token);
-                    self.stats.frame_tx.path_response += 1;
-                    builder.pad_to(MIN_INITIAL_SIZE);
-                    builder.finish_and_track(
-                        now,
-                        self,
-                        Some(SentFrames {
-                            non_retransmits: true,
-                            ..SentFrames::default()
-                        }),
-                        buf,
-                    );
-                    self.stats.udp_tx.on_sent(1, buf.len());
-                    return Some(Transmit {
-                        destination: remote,
-                        size: buf.len(),
-                        ecn: None,
-                        segment_size: None,
-                        src_ip: local_ip,
-                    });
-                }
+            {
+                // `unwrap` guaranteed to succeed because `builder_storage` was populated just
+                // above.
+                let mut builder = builder_storage.take().unwrap();
+                trace!("PATH_RESPONSE {:08x} (off-path)", token);
+                buf.write(frame::FrameType::PATH_RESPONSE);
+                buf.write(token);
+                self.stats.frame_tx.path_response += 1;
+                builder.pad_to(MIN_INITIAL_SIZE);
+                builder.finish_and_track(
+                    now,
+                    self,
+                    Some(SentFrames {
+                        non_retransmits: true,
+                        ..SentFrames::default()
+                    }),
+                    buf,
+                );
+                self.stats.udp_tx.on_sent(1, buf.len());
+                return Some(Transmit {
+                    destination: remote,
+                    size: buf.len(),
+                    ecn: None,
+                    segment_size: None,
+                    src_ip: local_ip,
+                });
             }
 
             let sent =
@@ -464,6 +486,7 @@ impl Connection {
             if sent.largest_acked.is_some() {
                 self.spaces[space_id].pending_acks.acks_sent();
                 self.timers.stop(Timer::MaxAckDelay);
+                self.next_bundled_ack_time = Some(now + self.next_bundled_ack_delay());
             }
 
             // Keep information about the packet around until it gets finalized
@@ -670,6 +693,8 @@ impl Connection {
         let is_0rtt = space_id == SpaceId::Data && space.crypto.is_none();
         space.pending_acks.maybe_ack_non_eliciting();
 
+        let pre_payload_len = buf.len();
+
         // HANDSHAKE_DONE
         if !is_0rtt && mem::replace(&mut space.pending.handshake_done, false) {
             buf.write(frame::FrameType::HANDSHAKE_DONE);
@@ -697,13 +722,14 @@ impl Connection {
 
         // ACK
         if space.pending_acks.can_send() {
-            Self::populate_acks(
+            Self::try_populate_acks(
                 now,
                 self.receiving_ecn,
                 &mut sent,
                 space,
                 buf,
                 &mut self.stats,
+                max_size,
             );
         }
 
@@ -753,18 +779,18 @@ impl Connection {
         }
 
         // PATH_RESPONSE
-        if buf.len() + 9 < max_size && space_id == SpaceId::Data {
-            if let Some(token) = self
+        if buf.len() + 9 < max_size
+            && space_id == SpaceId::Data
+            && let Some(token) = self
                 .path_responses
                 .pop_on_path(self.path.remote, self.local_ip)
-            {
-                sent.non_retransmits = true;
-                sent.requires_padding = true;
-                trace!("PATH_RESPONSE {:08x}", token);
-                buf.write(frame::FrameType::PATH_RESPONSE);
-                buf.write(token);
-                self.stats.frame_tx.path_response += 1;
-            }
+        {
+            sent.non_retransmits = true;
+            sent.requires_padding = true;
+            trace!("PATH_RESPONSE {:08x}", token);
+            buf.write(frame::FrameType::PATH_RESPONSE);
+            buf.write(token);
+            self.stats.frame_tx.path_response += 1;
         }
 
         // CRYPTO
@@ -918,20 +944,64 @@ impl Connection {
             self.stats.frame_tx.stream += sent.stream_frames.len() as u64;
         }
 
+        // Bundle ACK with other frames when there is room for them.
+        // We want to reuse encryption and underlying protocol overhead,
+        // but sending multiple ACKs for a single incoming packet is a waste of peer's resources,
+        // so we have next_bundled_ack_time to control when to send ACKs.
+        let any_frames_sent = buf.len() > pre_payload_len;
+        if any_frames_sent
+            && sent.largest_acked.is_none()
+            && self.next_bundled_ack_time.is_some_and(|time| time <= now)
+            && space.pending_acks.can_send_with_other_frames()
+        {
+            Self::try_populate_acks(
+                now,
+                self.receiving_ecn,
+                &mut sent,
+                space,
+                buf,
+                &mut self.stats,
+                max_size,
+            );
+        }
+
         sent
     }
 
-    /// Write pending ACKs into a buffer
+    /// The delay to wait after sending an ACK before bundling the next one.
+    ///
+    /// This delay prevents waste of peer's resources with processing bundled
+    /// ACKs unnecessarily frequently.
+    ///
+    /// If we receive an ack-eliciting packet while this delay is still pending,
+    /// `next_bundled_ack_time` is reset to `now`, which means this delay will be ignored.
+    /// So this delay only matters when we keep sending but stop receiving ack-eliciting
+    /// packets for a while.
+    ///
+    /// This should be at least `RTT + peer's max_ack_delay`: since a bundled ACK frame rides
+    /// along with an ack-eliciting frame, the packet carrying it is itself ack-eliciting.
+    /// We should give the peer enough time to acknowledge it.
+    /// Otherwise, we risk bundling another ACK before the peer has even had a chance
+    /// to acknowledge the previous one, which is a waste of remote peer's resources.
+    fn next_bundled_ack_delay(&self) -> Duration {
+        self.path.rtt.get() + self.ack_frequency.peer_max_ack_delay + TIMER_GRANULARITY
+    }
+
+    /// Tries to write pending ACKs into a buffer if there is enough space.
+    ///
+    /// If the ACK frame does not fit into the buffer, the ACK frame will not
+    /// be sent at all.
     ///
     /// This method assumes ACKs are pending, and should only be called if
     /// `!PendingAcks::ranges().is_empty()` returns `true`.
-    pub(super) fn populate_acks(
+    pub(super) fn try_populate_acks(
         now: Instant,
         receiving_ecn: bool,
         sent: &mut SentFrames,
         space: &mut PacketSpace,
         buf: &mut Vec<u8>,
         stats: &mut ConnectionStats,
+        max_size: usize,
     ) {
         debug_assert!(!space.pending_acks.ranges().is_empty());
 
@@ -942,7 +1012,6 @@ impl Connection {
         } else {
             None
         };
-        sent.largest_acked = space.pending_acks.ranges().max();
 
         let delay_micros = space.pending_acks.ack_delay(now).as_micros() as u64;
 
@@ -956,7 +1025,14 @@ impl Connection {
             delay_micros
         );
 
+        let no_acks_len = buf.len();
         frame::Ack::encode(delay as _, space.pending_acks.ranges(), ecn, buf);
+        if buf.len() > max_size {
+            // The ACK frame is too large. Remove it.
+            buf.truncate(no_acks_len);
+            return;
+        }
+        sent.largest_acked = space.pending_acks.ranges().max();
         stats.frame_tx.acks += 1;
     }
 }

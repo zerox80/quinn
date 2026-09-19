@@ -27,7 +27,7 @@ impl Connection {
         let prev_pto = self.pto(SpaceId::Data);
 
         let mut prev = mem::replace(&mut self.path, new_path);
-        self.drop_oversized_datagrams();
+        self.datagrams().drop_oversized();
         self.events.push_back(Event::PathUpdated);
 
         // Don't clobber the original path if the previous one hasn't been validated yet
@@ -82,11 +82,11 @@ impl Connection {
 
         // Subtract 1 to account for the CID we supplied while handshaking
         let mut n = self.peer_params.issue_cids_limit() - 1;
-        if let ConnectionSide::Server { server_config } = &self.side {
-            if server_config.has_preferred_address() {
-                // We also sent a CID in the transport parameters
-                n -= 1;
-            }
+        if let ConnectionSide::Server { server_config } = &self.side
+            && server_config.has_preferred_address()
+        {
+            // We also sent a CID in the transport parameters
+            n -= 1;
         }
         self.endpoint_events
             .push_back(EndpointEventInner::NeedIdentifiers(now, n));

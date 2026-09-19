@@ -247,7 +247,11 @@ fn bits_per_second(bytes: usize, seconds: f64) -> f64 {
 }
 
 fn per_second(value: f64, seconds: f64) -> f64 {
-    if seconds == 0.0 { 0.0 } else { value / seconds }
+    if seconds == 0.0 {
+        0.0
+    } else {
+        value / seconds
+    }
 }
 
 #[cfg(test)]

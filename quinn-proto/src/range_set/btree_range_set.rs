@@ -181,7 +181,6 @@ impl RangeSet {
         self.0.is_empty()
     }
 
-    #[cfg(test)]
     pub(crate) fn min(&self) -> Option<u64> {
         self.0.first_key_value().map(|(&start, _)| start)
     }

@@ -19,11 +19,11 @@ impl Connection {
             return Ok(None);
         };
 
-        if result.outgoing_key_update_acked {
-            if let Some(prev) = self.prev_crypto.as_mut() {
-                prev.end_packet = Some((result.number, now));
-                self.set_key_discard_timer(now, packet.header.space());
-            }
+        if result.outgoing_key_update_acked
+            && let Some(prev) = self.prev_crypto.as_mut()
+        {
+            prev.end_packet = Some((result.number, now));
+            self.set_key_discard_timer(now, packet.header.space());
         }
 
         if result.incoming_key_update {
