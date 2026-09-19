@@ -3022,7 +3022,8 @@ fn datagram_drop_send_respects_send_buffer_limit() {
             .send(vec![0; 9].into(), false),
         Err(SendDatagramError::TooLarge)
     );
-    assert_eq!(pair.client_datagrams(client_ch).send_buffer_space(), 8);
+    // The send buffer budget includes metadata, which alone exceeds these eight bytes.
+    assert_eq!(pair.client_datagrams(client_ch).send_buffer_space(), 0);
 }
 
 #[test]
@@ -4482,6 +4483,7 @@ fn ack_bundled_with_datagrams() {
     );
 }
 
+/// Path changes must discard oversized datagrams and wake blocked senders.
 #[test]
 fn path_changes_unblock_oversized_datagrams() {
     let _guard = subscribe();

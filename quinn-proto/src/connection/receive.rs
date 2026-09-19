@@ -100,8 +100,8 @@ impl Connection {
         let len = packet.header_data.len() + packet.payload.len();
         self.path.total_recvd = len as u64;
 
-        match self.state {
-            State::Handshake(ref mut state) => {
+        match &mut self.state {
+            State::Handshake(state) => {
                 state.expected_token = packet.header.token.clone();
             }
             _ => unreachable!("first packet must be delivered in Handshake state"),
@@ -242,10 +242,12 @@ impl Connection {
             }
             let offset = self.spaces[space].crypto_offset;
             let outgoing = Bytes::from(outgoing);
-            if let State::Handshake(ref mut state) = self.state {
-                if space == SpaceId::Initial && offset == 0 && self.side.is_client() {
-                    state.client_hello = Some(outgoing.clone());
-                }
+            if let State::Handshake(state) = &mut self.state
+                && space == SpaceId::Initial
+                && offset == 0
+                && self.side.is_client()
+            {
+                state.client_hello = Some(outgoing.clone());
             }
             self.spaces[space].crypto_offset += outgoing.len() as u64;
             trace!("wrote {} {:?} CRYPTO bytes", outgoing.len(), space);
@@ -365,7 +367,7 @@ impl Connection {
         stateless_reset: bool,
     ) {
         self.stats.udp_rx.ios += 1;
-        if let Some(ref packet) = packet {
+        if let Some(packet) = &packet {
             trace!(
                 "got {:?} packet ({} bytes) from {} using id {}",
                 packet.header.space(),
@@ -445,16 +447,16 @@ impl Connection {
                     debug!("discarding possible duplicate packet");
                     return;
                 }
-                if let Header::Initial(InitialHeader { ref token, .. }) = packet.header {
-                    if let State::Handshake(ref hs) = self.state {
-                        if self.side.is_server() && token != &hs.expected_token {
-                            // Clients must send the same retry token in every Initial. Initial
-                            // packets can be spoofed, so we discard rather than killing the
-                            // connection.
-                            warn!("discarding Initial with invalid retry token");
-                            return;
-                        }
-                    }
+                if let Header::Initial(InitialHeader { token, .. }) = &packet.header
+                    && let State::Handshake(hs) = &self.state
+                    && self.side.is_server()
+                    && token != &hs.expected_token
+                {
+                    // Clients must send the same retry token in every Initial. Initial
+                    // packets can be spoofed, so we discard rather than killing the
+                    // connection.
+                    warn!("discarding Initial with invalid retry token");
+                    return;
                 }
 
                 if !self.state.is_closed() {
@@ -580,7 +582,7 @@ impl Connection {
         number: Option<u64>,
         packet: Packet,
     ) -> Result<(), ConnectionError> {
-        let state = match self.state {
+        let state = match &mut self.state {
             State::Established => {
                 match packet.header.space() {
                     SpaceId::Data => {
@@ -618,7 +620,7 @@ impl Connection {
                 return Ok(());
             }
             State::Draining | State::Drained => return Ok(()),
-            State::Handshake(ref mut state) => state,
+            State::Handshake(state) => state,
         };
 
         match packet.header {
@@ -684,7 +686,7 @@ impl Connection {
                 self.streams.retransmit_all_for_0rtt();
 
                 let token_len = packet.payload.len() - 16;
-                let ConnectionSide::Client { ref mut token, .. } = self.side else {
+                let ConnectionSide::Client { token, .. } = &mut self.side else {
                     unreachable!("we already short-circuited if we're server");
                 };
                 *token = packet.payload.freeze().split_to(token_len);
@@ -867,7 +869,10 @@ impl Connection {
                 Frame::Ack(ack) => {
                     self.on_ack_received(now, packet.header.space(), ack)?;
                 }
-                Frame::Close(reason) => {
+                // Per RFC 9000 §12.4 Table 3, only a CONNECTION_CLOSE frame of type 0x1c may
+                // appear in Initial or Handshake packets. An application close (0x1d) falls
+                // through to the catch-all arm below.
+                Frame::Close(reason @ Close::Connection(_)) => {
                     self.error = Some(reason.into());
                     self.state = State::Draining;
                     return Ok(());
@@ -931,15 +936,13 @@ impl Connection {
             }
 
             let _guard = span.as_ref().map(|x| x.enter());
-            if packet.header.is_0rtt() {
-                match frame {
-                    Frame::Crypto(_) | Frame::Close(Close::Application(_)) => {
-                        return Err(TransportError::PROTOCOL_VIOLATION(
-                            "illegal frame type in 0-RTT",
-                        ));
-                    }
-                    _ => {}
-                }
+            // RFC 9000 §12.5: CRYPTO frames cannot be sent in 0-RTT packets. Both
+            // CONNECTION_CLOSE types are permitted there, as 0-RTT belongs to the application
+            // data packet number space; see §12.4 Table 3.
+            if packet.header.is_0rtt() && matches!(frame, Frame::Crypto(_)) {
+                return Err(TransportError::PROTOCOL_VIOLATION(
+                    "illegal frame type in 0-RTT",
+                ));
             }
             ack_eliciting |= frame.is_ack_eliciting();
 
@@ -986,7 +989,7 @@ impl Connection {
                         self.timers.stop(Timer::PathValidation);
                         self.path.challenge = None;
                         self.path.validated = true;
-                        if let Some((_, ref mut prev_path)) = self.prev_path {
+                        if let Some((_, prev_path)) = &mut self.prev_path {
                             prev_path.challenge = None;
                             prev_path.challenge_pending = false;
                         }
@@ -1081,22 +1084,7 @@ impl Connection {
                     match self.rem_cids.insert(frame) {
                         Ok(None) => {}
                         Ok(Some((retired, reset_token))) => {
-                            let pending_retired =
-                                &mut self.spaces[SpaceId::Data].pending.retire_cids;
-                            /// Ensure `pending_retired` cannot grow without bound. Limit is
-                            /// somewhat arbitrary but very permissive.
-                            const MAX_PENDING_RETIRED_CIDS: u64 = CidQueue::LEN as u64 * 10;
-                            // We don't bother counting in-flight frames because those are bounded
-                            // by congestion control.
-                            if (pending_retired.len() as u64)
-                                .saturating_add(retired.end.saturating_sub(retired.start))
-                                > MAX_PENDING_RETIRED_CIDS
-                            {
-                                return Err(TransportError::CONNECTION_ID_LIMIT_ERROR(
-                                    "queued too many retired CIDs",
-                                ));
-                            }
-                            pending_retired.extend(retired);
+                            self.spaces[SpaceId::Data].pending.retire_cids(retired)?;
                             self.set_reset_token(reset_token);
                         }
                         Err(InsertError::ExceedsLimit) => {
@@ -1109,8 +1097,7 @@ impl Connection {
                             // was retired all at once via retire_prior_to.
                             self.spaces[SpaceId::Data]
                                 .pending
-                                .retire_cids
-                                .push(frame.sequence);
+                                .retire_cids(frame.sequence..frame.sequence.saturating_add(1))?;
                             continue;
                         }
                     };
@@ -1193,6 +1180,7 @@ impl Connection {
         {
             self.timers
                 .set(Timer::MaxAckDelay, now + self.ack_frequency.max_ack_delay);
+            self.next_bundled_ack_time = Some(now);
         }
 
         // Issue stream ID credit due to ACKs of outgoing finish/resets and incoming finish/resets
@@ -1212,7 +1200,7 @@ impl Connection {
             && !is_probing_packet
             && number == self.spaces[SpaceId::Data].rx_packet
         {
-            let ConnectionSide::Server { ref server_config } = self.side else {
+            let ConnectionSide::Server { server_config } = &self.side else {
                 panic!("packets from unknown remote should be dropped by clients");
             };
             debug_assert!(

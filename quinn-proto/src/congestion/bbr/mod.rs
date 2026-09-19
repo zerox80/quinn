@@ -673,25 +673,9 @@ const DRAIN_TO_TARGET: bool = true;
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
-
-    #[test]
-    fn metrics_report_bandwidth_estimate() {
-        let mut bbr = Bbr::new(Arc::new(BbrConfig::default()), 1200);
-        assert_eq!(bbr.metrics().bandwidth_estimate, None);
-
-        let start = Instant::now();
-        let interval = Duration::from_millis(10);
-        bbr.max_bandwidth.on_sent(start, 1200);
-        bbr.max_bandwidth.on_sent(start + interval, 1200);
-        bbr.max_bandwidth
-            .on_ack(start + interval * 2, start, 1200, 0, false);
-        bbr.max_bandwidth.on_sent(start + interval * 2, 1200);
-        bbr.max_bandwidth
-            .on_ack(start + interval * 3, start + interval, 1200, 0, false);
-
-        assert_eq!(bbr.metrics().bandwidth_estimate, Some(960_000));
-    }
 
     #[test]
     fn pacing_adapts_to_reduced_bandwidth() {
@@ -796,5 +780,23 @@ mod tests {
         let bbr = Bbr::new(Arc::new(config), 1200);
         assert_eq!(bbr.init_cwnd, rfc_initial_window);
         assert_eq!(bbr.cwnd, rfc_initial_window);
+    }
+
+    #[test]
+    fn metrics_report_bandwidth_estimate() {
+        let mut bbr = Bbr::new(Arc::new(BbrConfig::default()), 1200);
+        assert_eq!(bbr.metrics().bandwidth_estimate, None);
+
+        let start = Instant::now();
+        let interval = Duration::from_millis(10);
+        bbr.max_bandwidth.on_sent(start, 1200);
+        bbr.max_bandwidth.on_sent(start + interval, 1200);
+        bbr.max_bandwidth
+            .on_ack(start + interval * 2, start, 1200, 0, false);
+        bbr.max_bandwidth.on_sent(start + interval * 2, 1200);
+        bbr.max_bandwidth
+            .on_ack(start + interval * 3, start + interval, 1200, 0, false);
+
+        assert_eq!(bbr.metrics().bandwidth_estimate, Some(960_000));
     }
 }

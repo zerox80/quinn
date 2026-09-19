@@ -189,6 +189,7 @@ impl Connection {
                     if let Some((_, prev)) = self.prev_path.take() {
                         self.path = prev;
                         self.set_loss_detection_timer(now);
+                        self.events.push_back(Event::PathUpdated);
                     }
                     self.path.challenge = None;
                     self.path.challenge_pending = false;
@@ -254,7 +255,9 @@ impl Connection {
     pub fn stats(&self) -> ConnectionStats {
         let mut stats = self.stats;
         stats.path.rtt = self.path.rtt.get();
+        stats.path.min_rtt = self.path.rtt.min();
         stats.path.cwnd = self.path.congestion.window();
+        stats.path.bandwidth_estimate = self.path.congestion.metrics().bandwidth_estimate;
         stats.path.current_mtu = self.path.mtud.current_mtu();
 
         stats
@@ -366,6 +369,11 @@ impl Connection {
         self.path.rtt.get()
     }
 
+    /// Minimum RTT seen on this path, ignoring ack delay
+    pub fn min_rtt(&self) -> Duration {
+        self.path.rtt.min()
+    }
+
     /// Current state of this connection's congestion controller, for debugging purposes
     pub fn congestion_state(&self) -> &dyn Controller {
         self.path.congestion.as_ref()
@@ -401,7 +409,7 @@ impl Connection {
         prev.challenge = None;
         prev.challenge_pending = false;
         self.prev_path = Some((self.rem_cids.active(), prev));
-        self.drop_oversized_datagrams();
+        self.datagrams().drop_oversized();
         // Bootstrap loss detection on the new path so old packets can still be recovered.
         self.ping();
         self.set_loss_detection_timer(now);
@@ -477,7 +485,7 @@ impl Connection {
         self.idle_timeout =
             negotiate_max_idle_timeout(self.config.max_idle_timeout, Some(params.max_idle_timeout));
         trace!("negotiated max idle timeout {:?}", self.idle_timeout);
-        if let Some(ref info) = params.preferred_address {
+        if let Some(info) = params.preferred_address {
             self.rem_cids.insert(NewConnectionId {
                 sequence: 1,
                 id: info.connection_id,

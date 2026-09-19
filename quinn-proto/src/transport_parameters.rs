@@ -327,7 +327,7 @@ impl TransportParameters {
                             }
                         }
                         TransportParameterId::StatelessResetToken => {
-                            if let Some(ref x) = self.stateless_reset_token {
+                            if let Some(x) = &self.stateless_reset_token {
                                 w.write_var(id as u64);
                                 w.write_var(16);
                                 w.put_slice(x);
@@ -347,28 +347,28 @@ impl TransportParameters {
                             }
                         }
                         TransportParameterId::PreferredAddress => {
-                            if let Some(ref x) = self.preferred_address {
+                            if let Some(x) = &self.preferred_address {
                                 w.write_var(id as u64);
                                 w.write_var(x.wire_size() as u64);
                                 x.write(w);
                             }
                         }
                         TransportParameterId::OriginalDestinationConnectionId => {
-                            if let Some(ref cid) = self.original_dst_cid {
+                            if let Some(cid) = &self.original_dst_cid {
                                 w.write_var(id as u64);
                                 w.write_var(cid.len() as u64);
                                 w.put_slice(cid);
                             }
                         }
                         TransportParameterId::InitialSourceConnectionId => {
-                            if let Some(ref cid) = self.initial_src_cid {
+                            if let Some(cid) = &self.initial_src_cid {
                                 w.write_var(id as u64);
                                 w.write_var(cid.len() as u64);
                                 w.put_slice(cid);
                             }
                         }
                         TransportParameterId::RetrySourceConnectionId => {
-                            if let Some(ref cid) = self.retry_src_cid {
+                            if let Some(cid) = &self.retry_src_cid {
                                 w.write_var(id as u64);
                                 w.write_var(cid.len() as u64);
                                 w.put_slice(cid);

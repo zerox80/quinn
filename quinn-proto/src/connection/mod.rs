@@ -413,7 +413,6 @@ impl Connection {
         }
         this
     }
-
 }
 
 impl fmt::Debug for Connection {

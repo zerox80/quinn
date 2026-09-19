@@ -2,6 +2,7 @@ use super::{ConnectionError, StreamEvent};
 
 /// Events of interest to the application
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum Event {
     /// The connection's handshake data is ready
     HandshakeDataReady,
@@ -25,4 +26,6 @@ pub enum Event {
     DatagramReceived,
     /// One or more application datagrams have been sent after blocking
     DatagramsUnblocked,
+    /// The currently active path was updated
+    PathUpdated,
 }

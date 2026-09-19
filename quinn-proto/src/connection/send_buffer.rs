@@ -5,22 +5,10 @@ use bytes::{Buf, Bytes};
 use crate::{VarInt, range_set::RangeSet};
 
 /// Buffer of outgoing retransmittable stream data
-#[derive(Debug)]
-struct Segment {
-    offset: u64,
-    bytes: Bytes,
-}
-
-impl Segment {
-    fn end(&self) -> u64 {
-        self.offset + self.bytes.len() as u64
-    }
-}
-
 #[derive(Default, Debug)]
 pub(super) struct SendBuffer {
     /// Data queued by the application but not yet acknowledged. May or may not have been sent.
-    unacked_segments: VecDeque<Segment>,
+    unacked_segments: VecDeque<Bytes>,
     /// Total size of `unacked_segments`
     unacked_len: usize,
     /// Acknowledged bytes removed from the first segment's view but still held by its allocation
@@ -31,6 +19,10 @@ pub(super) struct SendBuffer {
     ///
     /// Always lies in (offset - unacked.len())..offset
     unsent: u64,
+    /// Acknowledged ranges which couldn't be discarded yet as they don't include the earliest
+    /// offset in `unacked`
+    // TODO: Recover storage from these by compacting (#700)
+    acks: RangeSet,
     /// Previously transmitted ranges deemed lost
     retransmits: RangeSet,
 }
@@ -43,76 +35,47 @@ impl SendBuffer {
 
     /// Append application data to the end of the stream
     pub(super) fn write(&mut self, data: Bytes) {
-        let offset = self.offset;
         self.unacked_len += data.len();
         self.offset += data.len() as u64;
-        self.unacked_segments.push_back(Segment {
-            offset,
-            bytes: data,
-        });
+        self.unacked_segments.push_back(data);
     }
 
     /// Discard a range of acknowledged stream data
-    pub(super) fn ack(&mut self, range: Range<u64>) {
-        if range.is_empty() {
-            return;
-        }
-
+    pub(super) fn ack(&mut self, mut range: Range<u64>) {
         self.retransmits.remove(range.clone());
 
-        let mut i = 0;
-        while i < self.unacked_segments.len() {
-            let segment_start = self.unacked_segments[i].offset;
-            let segment_end = self.unacked_segments[i].end();
+        // Clamp the range to data which is still tracked
+        let base_offset = self.offset - self.unacked_len as u64;
+        range.start = base_offset.max(range.start);
+        range.end = base_offset.max(range.end);
 
-            if segment_end <= range.start {
-                i += 1;
-                continue;
-            }
-            if segment_start >= range.end {
-                break;
-            }
+        self.acks.insert(range);
 
-            let ack_start = segment_start.max(range.start);
-            let ack_end = segment_end.min(range.end);
-            if ack_start >= ack_end {
-                i += 1;
-                continue;
-            }
+        while self.acks.min() == Some(self.offset - self.unacked_len as u64) {
+            let prefix = self.acks.pop_min().unwrap();
+            let mut to_advance = (prefix.end - prefix.start) as usize;
 
-            let removed = (ack_end - ack_start) as usize;
-            self.unacked_len -= removed;
-            match (ack_start == segment_start, ack_end == segment_end) {
-                (true, true) => {
-                    self.unacked_segments.remove(i);
-                }
-                (true, false) => {
-                    let segment = &mut self.unacked_segments[i];
-                    segment.offset = ack_end;
-                    segment.bytes.advance(removed);
-                    i += 1;
-                }
-                (false, true) => {
-                    let keep = (ack_start - segment_start) as usize;
-                    self.unacked_segments[i].bytes.truncate(keep);
-                    i += 1;
-                }
-                (false, false) => {
-                    let keep = (ack_start - segment_start) as usize;
-                    let suffix_start = (ack_end - segment_start) as usize;
-                    let suffix = Segment {
-                        offset: ack_end,
-                        bytes: self.unacked_segments[i].bytes.slice(suffix_start..),
-                    };
-                    self.unacked_segments[i].bytes.truncate(keep);
-                    self.unacked_segments.insert(i + 1, suffix);
-                    i += 2;
+            self.unacked_len -= to_advance;
+            while to_advance > 0 {
+                let front = self
+                    .unacked_segments
+                    .front_mut()
+                    .expect("Expected buffered data");
+
+                if front.len() <= to_advance {
+                    to_advance -= front.len();
+                    self.unacked_segments.pop_front();
+                    self.front_trimmed = 0;
+
+                    if self.unacked_segments.len() * 4 < self.unacked_segments.capacity() {
+                        self.unacked_segments.shrink_to_fit();
+                    }
+                } else {
+                    front.advance(to_advance);
+                    self.front_trimmed += to_advance;
+                    to_advance = 0;
                 }
             }
-        }
-
-        if self.unacked_segments.len() * 4 < self.unacked_segments.capacity() {
-            self.unacked_segments.shrink_to_fit();
         }
     }
 
@@ -139,8 +102,7 @@ impl SendBuffer {
             // When the offset is known, we know how many bytes are required to encode it.
             // Offset 0 requires no space
             if range.start != 0 {
-                // SAFETY: stream/crypto offsets are encoded as QUIC variable-length integers and
-                // are kept within flow-control limits, so they are always less than 2^62.
+                // SAFETY: stream offsets remain within the QUIC variable-length integer range.
                 max_len -= VarInt::size(unsafe { VarInt::from_u64_unchecked(range.start) });
             }
             if range.end - range.start < max_len as u64 {
@@ -160,8 +122,7 @@ impl SendBuffer {
         // When the offset is known, we know how many bytes are required to encode it.
         // Offset 0 requires no space
         if self.unsent != 0 {
-            // SAFETY: stream/crypto offsets are encoded as QUIC variable-length integers and
-            // are kept within flow-control limits, so they are always less than 2^62.
+            // SAFETY: stream offsets remain within the QUIC variable-length integer range.
             max_len -= VarInt::size(unsafe { VarInt::from_u64_unchecked(self.unsent) });
         }
         if self.offset - self.unsent < max_len as u64 {
@@ -184,13 +145,19 @@ impl SendBuffer {
     /// should call the function again with an incremented start offset to
     /// retrieve more data.
     pub(super) fn get(&self, offsets: Range<u64>) -> &[u8] {
-        for segment in self.unacked_segments.iter() {
-            if offsets.start >= segment.offset && offsets.start < segment.end() {
-                let start = (offsets.start - segment.offset) as usize;
-                let end = (offsets.end - segment.offset) as usize;
+        let base_offset = self.offset - self.unacked_len as u64;
 
-                return &segment.bytes[start..end.min(segment.bytes.len())];
+        let mut segment_offset = base_offset;
+        for segment in self.unacked_segments.iter() {
+            if offsets.start >= segment_offset
+                && offsets.start < segment_offset + segment.len() as u64
+            {
+                let start = (offsets.start - segment_offset) as usize;
+                let end = (offsets.end - segment_offset) as usize;
+
+                return &segment[start..end.min(segment.len())];
             }
+            segment_offset += segment.len() as u64;
         }
 
         &[]
@@ -208,19 +175,14 @@ impl SendBuffer {
     /// Queue a range of sent but unacknowledged data to be retransmitted
     pub(super) fn retransmit(&mut self, range: Range<u64>) {
         debug_assert!(range.end <= self.unsent, "unsent data can't be lost");
-        if range.is_empty() {
+        // Previously acknowledged bytes may still be retained by their original allocation.
+        let start = range.start.max(self.offset - self.unacked_len as u64);
+        if start >= range.end {
             return;
         }
-
-        for segment in self.unacked_segments.iter() {
-            let start = range.start.max(segment.offset);
-            let end = range.end.min(segment.end());
-            if start < end {
-                self.retransmits.insert(start..end);
-            }
-            if segment.offset >= range.end {
-                break;
-            }
+        self.retransmits.insert(start..range.end);
+        for acked in self.acks.iter() {
+            self.retransmits.remove(acked);
         }
     }
 
@@ -247,9 +209,9 @@ impl SendBuffer {
         self.unsent != self.offset || !self.retransmits.is_empty()
     }
 
-    /// Compute the amount of data that hasn't been acknowledged
-    pub(super) fn unacked(&self) -> u64 {
-        self.unacked_len as u64
+    /// Bytes still retained from application writes, including acknowledged data
+    pub(super) fn buffered(&self) -> u64 {
+        (self.unacked_len + self.front_trimmed) as u64
     }
 }
 
@@ -398,10 +360,7 @@ mod tests {
         buf.ack(3..5);
         assert_eq!(aggregate_unacked(&buf), &MSG[5..]);
         buf.ack(7..9);
-        let mut expected = Vec::new();
-        expected.extend_from_slice(&MSG[5..7]);
-        expected.extend_from_slice(&MSG[9..]);
-        assert_eq!(aggregate_unacked(&buf), expected);
+        assert_eq!(aggregate_unacked(&buf), &MSG[5..]);
         buf.ack(4..7);
         assert_eq!(aggregate_unacked(&buf), &MSG[9..]);
         buf.ack(0..MSG_LEN);
@@ -440,6 +399,27 @@ mod tests {
     }
 
     #[test]
+    fn ack_cancels_queued_retransmits() {
+        let mut buf = SendBuffer::new();
+        buf.write(Bytes::from_static(b"abcdef"));
+        assert_eq!(buf.poll_transmit(64), (0..6, true));
+        buf.retransmit(0..6);
+
+        buf.ack(2..4);
+        assert_eq!(buf.buffered(), 6);
+        assert_eq!(buf.poll_transmit(64), (0..2, true));
+        assert_eq!(buf.poll_transmit(64), (4..6, true));
+
+        buf.ack(0..2);
+        buf.retransmit(0..6);
+        assert_eq!(buf.poll_transmit(64), (4..6, true));
+        buf.ack(4..6);
+        buf.retransmit(0..6);
+        assert_eq!(buf.buffered(), 0);
+        assert!(!buf.has_unsent_data());
+    }
+
+    #[test]
     fn ack() {
         let mut buf = SendBuffer::new();
         const MSG: &[u8] = b"Hello, world!";
@@ -457,21 +437,16 @@ mod tests {
         assert_eq!(buf.poll_transmit(16), (0..16, false));
         assert_eq!(buf.poll_transmit(16), (16..23, true));
         buf.ack(16..23);
-        let mut expected = Vec::new();
-        expected.extend_from_slice(&MSG[..16]);
-        expected.extend_from_slice(&MSG[23..]);
-        assert_eq!(aggregate_unacked(&buf), expected);
-        assert_eq!(buf.get(16..23), &[] as &[u8]);
+        assert_eq!(aggregate_unacked(&buf), MSG);
         buf.ack(0..16);
         assert_eq!(aggregate_unacked(&buf), &MSG[23..]);
-        buf.ack(23..MSG.len() as u64);
-        assert_eq!(aggregate_unacked(&buf), &[] as &[u8]);
+        assert!(buf.acks.is_empty());
     }
 
     fn aggregate_unacked(buf: &SendBuffer) -> Vec<u8> {
         let mut result = Vec::new();
         for segment in buf.unacked_segments.iter() {
-            result.extend_from_slice(&segment.bytes[..]);
+            result.extend_from_slice(&segment[..]);
         }
         result
     }

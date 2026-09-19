@@ -10,18 +10,6 @@ use crate::{
     frame::{Datagram, FrameStruct},
 };
 
-impl Connection {
-    /// Discard queued datagrams that no longer fit the active path, waking blocked senders.
-    pub(super) fn drop_oversized_datagrams(&mut self) {
-        if let Some(max_datagram_size) = self.datagrams().max_size() {
-            if self.datagrams.drop_oversized(max_datagram_size) && self.datagrams.send_blocked {
-                self.datagrams.send_blocked = false;
-                self.events.push_back(Event::DatagramsUnblocked);
-            }
-        }
-    }
-}
-
 /// API to control datagram traffic
 pub struct Datagrams<'a> {
     pub(super) conn: &'a mut Connection,
@@ -272,6 +260,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn drop_oversized_keeps_datagrams_at_limit() {
+        let mut state = DatagramState::default();
+        state.outgoing.push_back(Datagram {
+            data: Bytes::from_static(&[0; 10]),
+        });
+        state.outgoing.push_back(Datagram {
+            data: Bytes::from_static(&[0; 11]),
+        });
+
+        assert!(state.drop_oversized(10));
+
+        assert_eq!(state.outgoing.queue.len(), 1);
+        assert_eq!(state.outgoing.queue[0].data.len(), 10);
+        assert_eq!(state.outgoing.payload_bytes, 10);
+    }
+
+    #[test]
     fn make_space_for_accounts_for_new_datagram() {
         let mut state = DatagramState::default();
         state.outgoing.push_back(Datagram {
@@ -316,23 +321,6 @@ mod tests {
                 break;
             }
         }
-    }
-
-    #[test]
-    fn drop_oversized_keeps_datagrams_at_limit() {
-        let mut state = DatagramState::default();
-        state.outgoing.push_back(Datagram {
-            data: Bytes::from_static(&[0; 10]),
-        });
-        state.outgoing.push_back(Datagram {
-            data: Bytes::from_static(&[0; 11]),
-        });
-
-        assert!(state.drop_oversized(10));
-
-        assert_eq!(state.outgoing.queue.len(), 1);
-        assert_eq!(state.outgoing.queue[0].data.len(), 10);
-        assert_eq!(state.outgoing.payload_bytes, 10);
     }
 }
 

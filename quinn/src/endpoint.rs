@@ -279,7 +279,6 @@ impl Endpoint {
         while inner.prev_sockets.len() > MAX_PREV_SOCKETS {
             inner.prev_sockets.pop_front();
         }
-        inner.sender = inner.socket.create_sender();
         inner.ipv6 = addr.is_ipv6();
 
         // Update connection socket references
