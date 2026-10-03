@@ -174,7 +174,7 @@ jobs:
           ! wasm-tools print --skeleton target/wasm32-unknown-unknown/debug/quinn.wasm | grep 'import "env"'
 
       # Match the version of wasm-bindgen used in `Cargo.lock`
-      - run: cargo binstall wasm-bindgen-cli@0.2.128 --locked --no-confirm
+      - run: cargo binstall wasm-bindgen-cli@0.2.129 --locked --no-confirm
       - run: cargo test --locked -p quinn-proto --target wasm32-unknown-unknown
 
   msrv:
@@ -297,3 +297,29 @@ jobs:
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
       - uses: taiki-e/install-action@2f93566e17ac8fb18a7bb98459947bd2589cc54c # cargo-hack
       - run: cargo hack check --feature-powerset --depth 3 --optional-deps --no-dev-deps --ignore-private --skip "${{env.SKIP_FEATURES}}"
+
+  miri:
+    name: test cmsg under Miri
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            flags: -Zmiri-strict-provenance
+          - os: macos-latest
+            flags: ''
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
+        with:
+          toolchain: nightly
+          components: miri, rust-src
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      # Only socket-free tests can run under Miri; these exercise the pointer handling in the
+      # cmsg helpers, which the socket-based tests never reach in an interpreter.
+      - run: cargo miri test --locked -p quinn-udp --lib -- cmsg::tests linux::tests
+        env:
+          MIRIFLAGS: ${{ matrix.flags }}
+      - run: cargo miri test --locked -p quinn-udp --lib -- cmsg::tests linux::tests
+        env:
+          MIRIFLAGS: ${{ matrix.flags }} -Zmiri-tree-borrows

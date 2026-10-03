@@ -14,7 +14,7 @@ use rand::{RngExt, SeedableRng, rngs::StdRng};
 use tracing::{debug, error, trace, trace_span, warn};
 
 use crate::{
-    Dir, Duration, EndpointConfig, Frame, INITIAL_MTU, Instant, MAX_CID_SIZE, MAX_STREAM_COUNT,
+    Dir, Duration, EndpointConfig, Frame, Instant, MAX_CID_SIZE, MAX_STREAM_COUNT,
     MIN_INITIAL_SIZE, Side, StreamId, TIMER_GRANULARITY, Transmit, TransportError,
     TransportErrorCode, VarInt,
     cid_queue::CidQueue,
@@ -274,10 +274,32 @@ pub struct Connection {
     version: u32,
 }
 
+/// Parameters to `Connection::new` other than the TLS session
+pub(crate) struct ConnectionArgs {
+    pub(crate) endpoint_config: Arc<EndpointConfig>,
+    pub(crate) transport_config: Arc<TransportConfig>,
+    /// Destination CID of the first Initial packet sent by the client
+    pub(crate) init_cid: ConnectionId,
+    /// CID initially issued to the peer for addressing this connection
+    pub(crate) loc_cid: ConnectionId,
+    /// CID initially issued by the peer for addressing it
+    pub(crate) rem_cid: ConnectionId,
+    pub(crate) remote: SocketAddr,
+    pub(crate) local_ip: Option<IpAddr>,
+    pub(crate) local_cid_len: usize,
+    pub(crate) local_cid_lifetime: Option<Duration>,
+    pub(crate) now: Instant,
+    pub(crate) version: u32,
+    pub(crate) allow_mtud: bool,
+    pub(crate) rng_seed: [u8; 32],
+    pub(crate) side_args: SideArgs,
+}
+
 struct BufferedHandshakePacket {
     received_at: Instant,
     remote: SocketAddr,
     local_ip: Option<IpAddr>,
+    ecn: Option<EcnCodepoint>,
     number: u64,
     packet: Packet,
 }
@@ -285,23 +307,23 @@ struct BufferedHandshakePacket {
 const MAX_BUFFERED_HANDSHAKE_1RTT_PACKETS: usize = 64;
 
 impl Connection {
-    pub(crate) fn new(
-        endpoint_config: Arc<EndpointConfig>,
-        config: Arc<TransportConfig>,
-        init_cid: ConnectionId,
-        loc_cid: ConnectionId,
-        rem_cid: ConnectionId,
-        remote: SocketAddr,
-        local_ip: Option<IpAddr>,
-        crypto: Box<dyn crypto::Session>,
-        local_cid_len: usize,
-        local_cid_lifetime: Option<Duration>,
-        now: Instant,
-        version: u32,
-        allow_mtud: bool,
-        rng_seed: [u8; 32],
-        side_args: SideArgs,
-    ) -> Self {
+    pub(crate) fn new(crypto: Box<dyn crypto::Session>, args: ConnectionArgs) -> Self {
+        let ConnectionArgs {
+            endpoint_config,
+            transport_config: config,
+            init_cid,
+            loc_cid,
+            rem_cid,
+            remote,
+            local_ip,
+            local_cid_len,
+            local_cid_lifetime,
+            now,
+            version,
+            allow_mtud,
+            rng_seed,
+            side_args,
+        } = args;
         let pref_addr_cid = side_args.pref_addr_cid();
         let path_validated = side_args.path_validated();
         let connection_side = ConnectionSide::from(side_args);
@@ -491,6 +513,90 @@ fn negotiate_max_idle_timeout(x: Option<VarInt>, y: Option<VarInt>) -> Option<Du
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "rustls-ring")]
+    #[test]
+    fn large_initial_token_leaves_room_for_close() {
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(cert.cert.der().clone()).unwrap();
+        let config = crate::ClientConfig::with_root_certificates(Arc::new(roots)).unwrap();
+        // With 40 bytes of header overhead, a 16-byte tag, and a 35-byte ACK,
+        // a 1084-byte token leaves exactly ConnectionClose::SIZE_BOUND bytes.
+        for (token_len, ack_fits) in [
+            (1083, true),
+            (1084, true),
+            (1085, false),
+            (1100, false),
+            // Exactly enough frame space for CONNECTION_CLOSE alone.
+            (1119, false),
+        ] {
+            config
+                .token_store
+                .insert("localhost", vec![0; token_len].into());
+            let mut endpoint =
+                crate::Endpoint::new(Arc::new(EndpointConfig::default()), None, true);
+            let now = Instant::now();
+            let (_, mut conn) = endpoint
+                .connect(
+                    now,
+                    config.clone(),
+                    "[::1]:4433".parse().unwrap(),
+                    "localhost",
+                )
+                .unwrap();
+            let keys = conn.crypto.initial_keys(conn.initial_dst_cid, Side::Server);
+            let space = &mut conn.spaces[SpaceId::Initial];
+            for pn in (0..32).step_by(2) {
+                space.pending_acks.insert_one(pn, now);
+                space.dedup.insert(pn);
+                space
+                    .pending_acks
+                    .packet_received(now, pn, true, &space.dedup);
+            }
+            conn.close(now, 0u32.into(), Bytes::new());
+            let mut buf = Vec::new();
+            assert!(conn.poll_transmit(now, 1, &mut buf).is_some());
+            assert!(buf.len() <= 1200);
+            assert!(!conn.close);
+
+            let (packet, rest) = PartialDecode::new(
+                buf.as_slice().into(),
+                &FixedLengthConnectionIdParser::new(0),
+                crate::DEFAULT_SUPPORTED_VERSIONS,
+                false,
+            )
+            .unwrap();
+            assert!(rest.is_none());
+            let mut packet = packet.finish(Some(&*keys.header.remote)).unwrap();
+            assert_eq!(packet.header_data.len(), 40 + token_len);
+            keys.packet
+                .remote
+                .decrypt(0, &packet.header_data, &mut packet.payload)
+                .unwrap();
+            let mut frames = frame::Iter::new(packet.payload.freeze())
+                .unwrap()
+                .map(Result::unwrap)
+                .filter(|frame| !matches!(frame, Frame::Padding));
+            if ack_fits {
+                assert!(
+                    matches!(frames.next(), Some(Frame::Ack(_))),
+                    "token {token_len}"
+                );
+            }
+            assert!(
+                matches!(
+                    frames.next(),
+                    Some(Frame::Close(Close::Connection(frame::ConnectionClose {
+                        error_code: TransportErrorCode::APPLICATION_ERROR,
+                        ..
+                    })))
+                ),
+                "token {token_len}"
+            );
+            assert!(frames.next().is_none());
+        }
+    }
 
     #[test]
     fn negotiate_max_idle_timeout_commutative() {
